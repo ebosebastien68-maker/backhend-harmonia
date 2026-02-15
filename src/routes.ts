@@ -2,10 +2,10 @@
 // ROUTES - HUB CENTRAL
 // =====================================================
 // Rôle : Diriger les requêtes vers les bons handlers
-//        selon le chemin appelé
 // =====================================================
 
 import { Router, Request, Response } from 'express'
+import { handleVraiFaux } from './handlers/vrai-faux'
 
 // Créer le routeur Express
 const router = Router()
@@ -28,15 +28,18 @@ router.post('/test', (req: Request, res: Response) => {
 })
 
 // =====================================================
-// ROUTES PRINCIPALES (À DÉCOMMENTER PLUS TARD)
+// ROUTES PRINCIPALES
 // =====================================================
 
-// import { handleGame } from './handlers/game'
+// Route vrai-faux : /vrai-faux
+router.post('/vrai-faux', handleVraiFaux)
+
+// =====================================================
+// ROUTES À VENIR (décommenter plus tard)
+// =====================================================
+
 // import { handleAdmin } from './handlers/admin'
 // import { handleUser } from './handlers/user'
-
-// Route jeu : /game
-// router.post('/game', handleGame)
 
 // Route admin : /admin
 // router.post('/admin', handleAdmin)
