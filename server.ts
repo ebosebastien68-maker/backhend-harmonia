@@ -1,20 +1,15 @@
 // =====================================================
 // HARMONIA BACKEND - POINT D'ENTRÉE
 // =====================================================
-// Rôle : Ouvrir le port, installer les middlewares,
-//        charger les routes, démarrer le serveur
-// =====================================================
 
-import express, { Request, Response } from 'express'
+import express, { Request, Response, NextFunction } from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
 import corsConfig from './src/config/cors'
 import routes from './src/routes'
 
-// Charger les variables d'environnement
 dotenv.config()
 
-// Créer l'application Express
 const app = express()
 const PORT = process.env.PORT || 3000
 const NODE_ENV = process.env.NODE_ENV || 'development'
@@ -23,17 +18,12 @@ const NODE_ENV = process.env.NODE_ENV || 'development'
 // MIDDLEWARES GLOBAUX
 // =====================================================
 
-// CORS : Autoriser le frontend à appeler le backend
 app.use(cors(corsConfig))
-
-// Parser JSON : Lire req.body en JSON
 app.use(express.json())
-
-// Parser URL-encoded : Lire les formulaires
 app.use(express.urlencoded({ extended: true }))
 
-// Logger basique : Afficher chaque requête
-app.use((req: Request, res: Response, next) => {
+// Logger basique
+app.use((req: Request, _res: Response, next: NextFunction) => {
   const timestamp = new Date().toISOString()
   console.log(`[${timestamp}] ${req.method} ${req.path}`)
   next()
@@ -43,8 +33,8 @@ app.use((req: Request, res: Response, next) => {
 // ROUTES
 // =====================================================
 
-// Route de santé (test connexion)
-app.get('/health', (req: Request, res: Response) => {
+// Route de santé
+app.get('/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     message: '🚀 Backend Harmonia is alive!',
@@ -53,10 +43,10 @@ app.get('/health', (req: Request, res: Response) => {
   })
 })
 
-// Charger toutes les routes depuis src/routes.ts
+// Charger toutes les routes
 app.use('/', routes)
 
-// Route 404 (si aucune route ne correspond)
+// Route 404
 app.use((req: Request, res: Response) => {
   res.status(404).json({
     error: 'Route non trouvée',
@@ -70,7 +60,7 @@ app.use((req: Request, res: Response) => {
 // GESTION DES ERREURS GLOBALES
 // =====================================================
 
-app.use((err: Error, req: Request, res: Response, next: any) => {
+app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   console.error(`[${new Date().toISOString()}] ERROR:`, err)
   
   res.status(500).json({
