@@ -14,8 +14,6 @@ const allowedOrigins = allowedOriginsString.split(',').map(origin => origin.trim
 // Origines par défaut si .env non défini
 const defaultOrigins = [
   'https://harmonia-world.vercel.app',  // Production
-  'http://localhost:8081',              // Expo dev
-  'http://localhost:19006',             // Web dev
 ]
 
 // Utiliser les origines définies ou les valeurs par défaut
