@@ -4,12 +4,8 @@
 
 import { CorsOptions } from 'cors'
 
-// En production, forcer l'origin Vercel
-const isProduction = process.env.NODE_ENV === 'production'
-
-const allowedOrigins = isProduction 
-  ? ['https://harmonia-world.vercel.app']
-  
+// En production uniquement
+const allowedOrigins = ['https://harmonia-world.vercel.app']
 
 // Configuration CORS
 const corsConfig: CorsOptions = {
@@ -34,7 +30,7 @@ const corsConfig: CorsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization']
 }
 
-console.log('🔒 CORS configuré - Mode:', isProduction ? 'PRODUCTION' : 'DEVELOPMENT')
+console.log('🔒 CORS configuré en PRODUCTION')
 console.log('🔒 Origins autorisées:', allowedOrigins)
 
 export default corsConfig
