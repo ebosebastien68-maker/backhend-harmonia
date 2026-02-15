@@ -1,48 +1,40 @@
 // =====================================================
-// CONFIGURATION CORS
-// =====================================================
-// Rôle : Autoriser uniquement certaines origines
-//        (frontend) à appeler le backend
+// CONFIGURATION CORS - VERSION PRODUCTION
 // =====================================================
 
 import { CorsOptions } from 'cors'
 
-// Récupérer les origines autorisées depuis .env
-const allowedOriginsString = process.env.ALLOWED_ORIGINS || ''
-const allowedOrigins = allowedOriginsString.split(',').map(origin => origin.trim())
+// En production, forcer l'origin Vercel
+const isProduction = process.env.NODE_ENV === 'production'
 
-// Origines par défaut si .env non défini
-const defaultOrigins = [
-  'https://harmonia-world.vercel.app',  // Production
-]
-
-// Utiliser les origines définies ou les valeurs par défaut
-const origins = allowedOrigins.length > 0 ? allowedOrigins : defaultOrigins
+const allowedOrigins = isProduction 
+  ? ['https://harmonia-world.vercel.app']
+  
 
 // Configuration CORS
 const corsConfig: CorsOptions = {
   origin: (origin, callback) => {
-    // Autoriser les requêtes sans origin (ex: Postman, curl)
+    // Autoriser les requêtes sans origin (Postman, curl)
     if (!origin) {
       return callback(null, true)
     }
 
     // Vérifier si l'origin est autorisée
-    if (origins.includes(origin)) {
+    if (allowedOrigins.includes(origin)) {
+      console.log(`✅ Origin autorisée: ${origin}`)
       callback(null, true)
     } else {
-      console.warn(`⚠️  Origin non autorisée: ${origin}`)
+      console.warn(`⚠️  Origin BLOQUÉE: ${origin}`)
+      console.warn(`   Origins autorisées:`, allowedOrigins)
       callback(new Error('Not allowed by CORS'))
     }
   },
-  credentials: true,  // Autoriser les cookies
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }
 
-// Log des origines autorisées (seulement en dev)
-if (process.env.NODE_ENV === 'development') {
-  console.log('✅ CORS configuré avec origines:', origins)
-}
+console.log('🔒 CORS configuré - Mode:', isProduction ? 'PRODUCTION' : 'DEVELOPMENT')
+console.log('🔒 Origins autorisées:', allowedOrigins)
 
 export default corsConfig
