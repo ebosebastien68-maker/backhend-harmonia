@@ -10,7 +10,6 @@ export async function handleGame(req: Request, res: Response) {
 
   console.log(`[${new Date().toISOString()}] game/${functionName}`)
 
-  // Vérifier user_id (sauf pour listSessions)
   if (functionName !== 'listSessions' && !user_id) {
     return res.status(401).json({
       error: 'user_id requis',
@@ -47,8 +46,6 @@ export async function handleGame(req: Request, res: Response) {
   }
 }
 
-// ========== FONCTIONS ==========
-
 async function listSessions(params: any, res: Response) {
   try {
     const { game_key } = params
@@ -69,7 +66,7 @@ async function listSessions(params: any, res: Response) {
   }
 }
 
-async function joinSession(userId: string, params: any, res: Response) {
+async function joinSession(_userId: string, params: any, res: Response) {
   try {
     const { session_id } = params
     if (!session_id) return res.status(400).json({ error: 'session_id requis' })
@@ -125,7 +122,7 @@ async function getQuestions(userId: string, params: any, res: Response) {
   }
 }
 
-async function submitAnswer(userId: string, params: any, res: Response) {
+async function submitAnswer(_userId: string, params: any, res: Response) {
   try {
     const { run_question_id, answer } = params
     if (!run_question_id || typeof answer !== 'boolean') {
@@ -167,15 +164,18 @@ async function getLeaderboard(userId: string, params: any, res: Response) {
       .eq('party_id', run.party_id)
       .order('score', { ascending: false })
 
-    const leaderboardWithRank = leaderboard?.map((player, index) => ({
-      rank: index + 1,
-      user_id: player.user_id,
-      score: player.score,
-      nom: player.profiles?.nom,
-      prenom: player.profiles?.prenom,
-      avatar_url: player.profiles?.avatar_url,
-      is_current_user: player.user_id === userId
-    }))
+    const leaderboardWithRank = leaderboard?.map((player, index) => {
+      const profile = player.profiles as any
+      return {
+        rank: index + 1,
+        user_id: player.user_id,
+        score: player.score,
+        nom: profile?.nom || '',
+        prenom: profile?.prenom || '',
+        avatar_url: profile?.avatar_url || null,
+        is_current_user: player.user_id === userId
+      }
+    })
 
     return res.json({ success: true, leaderboard: leaderboardWithRank || [], timestamp: new Date().toISOString() })
   } catch (error: any) {
