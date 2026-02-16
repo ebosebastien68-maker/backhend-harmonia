@@ -1,28 +1,24 @@
 // =====================================================
 // ROUTES - HUB CENTRAL
 // =====================================================
-// Rôle : Diriger les requêtes vers les bons handlers
-// =====================================================
 
 import { Router, Request, Response } from 'express'
-import { handleVraiFaux } from './handlers/vrai-faux'
+import { handleGame } from './handlers/game'
+import { handleAdmin } from './handlers/admin'
 
-// Créer le routeur Express
 const router = Router()
 
 // =====================================================
-// ROUTE TEST (pour vérifier que le routing fonctionne)
+// ROUTE TEST
 // =====================================================
 
 router.post('/test', (req: Request, res: Response) => {
   const { message } = req.body
-  
-  console.log(`[${new Date().toISOString()}] Route /test appelée`)
-  
+  console.log(`[${new Date().toISOString()}] Route /test`)
   res.json({
     success: true,
     message: 'Route test fonctionne !',
-    received: message || 'Aucun message reçu',
+    received: message || 'Aucun message',
     timestamp: new Date().toISOString()
   })
 })
@@ -31,24 +27,15 @@ router.post('/test', (req: Request, res: Response) => {
 // ROUTES PRINCIPALES
 // =====================================================
 
-// Route vrai-faux : /vrai-faux
-router.post('/vrai-faux', handleVraiFaux)
+// Route jeu (joueurs)
+router.post('/game', handleGame)
 
-// =====================================================
-// ROUTES À VENIR (décommenter plus tard)
-// =====================================================
-
-// import { handleAdmin } from './handlers/admin'
-// import { handleUser } from './handlers/user'
-
-// Route admin : /admin
-// router.post('/admin', handleAdmin)
-
-// Route user : /user
-// router.post('/user', handleUser)
+// Route admin
+router.post('/admin', handleAdmin)
 
 // =====================================================
 // EXPORT
 // =====================================================
 
 export default router
+    
