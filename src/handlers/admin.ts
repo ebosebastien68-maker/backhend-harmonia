@@ -145,7 +145,7 @@ async function createSession(adminId: string, params: any, res: Response) {
         description: description || null,
         is_paid: is_paid || false,
         price_cfa: price_cfa || 0,
-        created_by: adminId
+        created_by: _adminId
       })
       .select()
       .single()
@@ -218,7 +218,7 @@ async function addQuestions(_adminId: string, params: any, res: Response) {
         question_text: q.question,
         correct_answer: q.answer,
         score: q.score || 10,
-        created_by: adminId
+        created_by: _adminId
       })))
       .select()
 
