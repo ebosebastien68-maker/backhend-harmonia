@@ -1,5 +1,5 @@
 // =====================================================
-// HANDLER ADMIN - VERSION DIAGNOSTIC PROFOND
+// HANDLER ADMIN - VERSION PRODUCTION (NETTOYÉE)
 // =====================================================
 
 import { Request, Response } from 'express'
@@ -7,8 +7,6 @@ import supabase from '../config/supabase'
 
 export async function handleAdmin(req: Request, res: Response) {
   const { function: functionName, email, password, ...params } = req.body
-
-  console.log(`[${new Date().toISOString()}] 🛠️ Requête Admin: ${functionName} pour ${email}`);
 
   if (!email || !password) {
     return res.status(400).json({ error: 'Email et mot de passe requis' })
@@ -24,69 +22,35 @@ export async function handleAdmin(req: Request, res: Response) {
     })
 
     if (authError || !authData.user) {
-      console.warn(`⛔ Auth échouée: ${authError?.message}`)
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' })
     }
 
-    const uid = authData.user.id;
-
     // =====================================================
-    // ÉTAPE 2 : DIAGNOSTIC DE VISIBILITÉ (TEST RLS)
-    // =====================================================
-    // On vérifie si le serveur "voit" au moins un profil dans la table
-    const { count: totalVisibles, error: testError } = await supabase
-      .from('profiles')
-      .select('*', { count: 'exact', head: true });
-
-    console.log(`[DIAGNOSTIC RENDER] UID: ${uid}`);
-    console.log(`[DIAGNOSTIC RENDER] Profils accessibles par le serveur: ${totalVisibles ?? 0}`);
-    if (testError) console.error(`[DIAGNOSTIC RENDER] Erreur test visibilité:`, testError.message);
-
-    // =====================================================
-    // ÉTAPE 3 : VÉRIFICATION DU RÔLE
+    // ÉTAPE 2 : VÉRIFICATION DU RÔLE
     // =====================================================
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('id, role, nom, prenom')
-      .eq('id', uid)
+      .eq('id', authData.user.id)
       .maybeSingle()
 
-    if (profileError) {
-      console.error(`❌ Erreur SQL Supabase:`, profileError.message);
-      return res.status(500).json({ error: 'Erreur base de données', details: profileError.message });
+    if (profileError || !profile) {
+      console.error(`⛔ Accès refusé pour l'UID: ${authData.user.id}`);
+      return res.status(403).json({ error: 'Accès refusé : Profil inexistant' })
     }
 
-    if (!profile) {
-      console.error(`⛔ Profil introuvable pour l'UID: ${uid}`);
-      return res.status(403).json({ 
-        error: 'Accès refusé : Profil inexistant',
-        debug: {
-          uid_tente: uid,
-          total_visibles: totalVisibles ?? 0,
-          info: "Si total_visibles est 0, la clé service_role est absente ou bloquée par la RLS."
-        }
-      })
-    }
-
-    // --- NORMALISATION DU RÔLE ---
-    const rawRole = profile.role;
-    const normalizedRole = rawRole?.toString().toLowerCase().trim();
+    // Normalisation du rôle pour la vérification
+    const normalizedRole = profile.role?.toString().toLowerCase().trim();
     const allowedRoles = ['admin', 'adminpro', 'supreme'];
 
-    console.log(`[DEBUG AUTH] Rôle brut: "${rawRole}" | Rôle normalisé: "${normalizedRole}"`);
-
     if (!normalizedRole || !allowedRoles.includes(normalizedRole)) {
-      console.warn(`⛔ Accès refusé. Rôle "${normalizedRole}" non autorisé.`);
-      return res.status(403).json({ 
-        error: 'Droits insuffisants',
-        votre_role: normalizedRole
-      })
+      return res.status(403).json({ error: 'Droits insuffisants' })
     }
 
-    console.log(`✅ Accès validé pour ${profile.prenom} (${normalizedRole})`)
+    console.log(`✅ ${profile.prenom} connecté en tant que ${normalizedRole}`);
 
     // =====================================================
-    // ÉTAPE 4 : ROUTAGE DES FONCTIONS
+    // ÉTAPE 3 : ROUTAGE DES FONCTIONS
     // =====================================================
     switch (functionName) {
       case 'createSession': return await createSession(profile.id, params, res)
@@ -101,13 +65,13 @@ export async function handleAdmin(req: Request, res: Response) {
     }
 
   } catch (error: any) {
-    console.error(`💥 CRASH SERVEUR:`, error)
-    return res.status(500).json({ error: 'Erreur serveur', details: error.message })
+    console.error(`💥 ERREUR SERVEUR:`, error.message)
+    return res.status(500).json({ error: 'Erreur interne du serveur' })
   }
 }
 
 // =====================================================
-// FONCTIONS MÉTIER (INSERT / UPDATE DIRECTS)
+// FONCTIONS MÉTIER
 // =====================================================
 
 async function createSession(adminId: string, params: any, res: Response) {
@@ -199,13 +163,21 @@ async function getStatistics(params: any, res: Response) {
   const { run_id } = params
   if (!run_id) return res.status(400).json({ error: 'run_id requis' })
 
+  // Validation du format UUID pour éviter l'erreur 22P02 (crash Postgres)
+  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!uuidRegex.test(run_id)) {
+    return res.status(400).json({ error: 'Format de run_id invalide' });
+  }
+
   const [runRes, qRes, aRes] = await Promise.all([
-    supabase.from('game_runs').select('*').eq('id', run_id).single(),
+    supabase.from('game_runs').select('*').eq('id', run_id).maybeSingle(),
     supabase.from('run_questions').select('*', { count: 'exact', head: true }).eq('run_id', run_id),
     supabase.from('user_run_answers').select('*', { count: 'exact', head: true }).eq('run_id', run_id)
   ])
 
   if (runRes.error) throw runRes.error
+  if (!runRes.data) return res.status(404).json({ error: 'Run non trouvé' })
+
   return res.json({
     success: true,
     statistics: {
