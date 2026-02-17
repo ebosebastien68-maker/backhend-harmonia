@@ -1,89 +1,68 @@
 // =====================================================
-// HANDLER ADMIN - AUTH VIA SUPABASE AUTH
+// HANDLER ADMIN - VERSION CORRIGÉE (RENDER & SUPABASE)
 // =====================================================
 
 import { Request, Response } from 'express'
-import { createClient } from '@supabase/supabase-js'
-import supabase from '../config/supabase'
+import supabase from '../config/supabase' // Utilise ton client Service Role configuré
 
 export async function handleAdmin(req: Request, res: Response) {
+  // Extraction des paramètres
   const { function: functionName, email, password, ...params } = req.body
 
-  console.log(`[${new Date().toISOString()}] admin/${functionName}`)
+  console.log(`[${new Date().toISOString()}] 🛠️ Admin Request: ${functionName}`)
 
-  // ========== ÉTAPE 1 : VÉRIFIER EMAIL + MOT DE PASSE VIA SUPABASE AUTH ==========
-
+  // 1. Validation basique
   if (!email || !password) {
-    return res.status(401).json({
-      error: 'Email et mot de passe requis',
-      timestamp: new Date().toISOString()
-    })
+    return res.status(400).json({ error: 'Email et mot de passe requis' })
   }
 
   try {
-    // Créer un client Supabase avec la clé ANON pour l'authentification
-    const supabaseAuth = createClient(
-      process.env.SUPABASE_URL!,
-      process.env.SUPABASE_ANON_KEY!
-    )
-
-    // Connexion via Supabase Auth
-    const { data: authData, error: authError } = await supabaseAuth.auth.signInWithPassword({
+    // =====================================================
+    // ÉTAPE 1 : AUTHENTIFICATION (Via Service Role)
+    // =====================================================
+    
+    // On vérifie les identifiants
+    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
       email: email.trim(),
       password: password
     })
 
     if (authError || !authData.user) {
-      console.warn(`⚠️  Auth échouée pour: ${email}`, authError?.message)
-      return res.status(401).json({
-        error: 'Email ou mot de passe incorrect',
-        timestamp: new Date().toISOString()
-      })
+      console.warn(`⛔ Auth échouée pour ${email}: ${authError?.message}`)
+      return res.status(401).json({ error: 'Email ou mot de passe incorrect' })
     }
 
-    console.log(`✅ Auth réussie: ${authData.user.id}`)
-
-    // ========== ÉTAPE 2 : VÉRIFIER LE RÔLE ==========
+    // =====================================================
+    // ÉTAPE 2 : VÉRIFICATION DU RÔLE (Table profiles)
+    // =====================================================
 
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('id, role, nom, prenom')
       .eq('id', authData.user.id)
-      .single()
+      .maybeSingle() // Utilise maybeSingle pour éviter le crash si vide
 
+    // Gestion cas profil inexistant
     if (profileError || !profile) {
-      console.warn(`⚠️  Profil non trouvé pour: ${authData.user.id}`)
-      return res.status(401).json({
-        error: 'Profil non trouvé',
-        timestamp: new Date().toISOString()
-      })
+      console.error(`⛔ Profil introuvable pour ${authData.user.id}`)
+      return res.status(403).json({ error: 'Profil introuvable. Contactez le support.' })
     }
 
-    console.log(`✅ Profil: ${profile.nom} ${profile.prenom} (${profile.role})`)
-
+    // Vérification des droits Admin
     const allowedRoles = ['admin', 'adminpro', 'supreme']
-    const rejectedRoles = ['user', 'userpro']
-
-    if (rejectedRoles.includes(profile.role)) {
-      console.warn(`⚠️  Accès refusé - Role: ${profile.role}`)
-      return res.status(403).json({
-        error: 'Accès refusé : rôle insuffisant',
-        details: `Votre rôle (${profile.role}) ne permet pas d'accéder aux fonctions admin`,
-        required_roles: allowedRoles,
-        timestamp: new Date().toISOString()
-      })
-    }
-
     if (!allowedRoles.includes(profile.role)) {
-      return res.status(403).json({
-        error: 'Accès refusé : rôle invalide',
-        timestamp: new Date().toISOString()
+      console.warn(`⛔ Accès refusé. Rôle actuel : ${profile.role}`)
+      return res.status(403).json({ 
+        error: 'Accès refusé : Droits insuffisants',
+        current_role: profile.role 
       })
     }
 
-    console.log(`✅ Admin autorisé: ${profile.role}`)
+    console.log(`✅ Admin identifié : ${profile.prenom} (${profile.role})`)
 
-    // ========== ÉTAPE 3 : EXÉCUTER LA FONCTION ==========
+    // =====================================================
+    // ÉTAPE 3 : ROUTAGE DES FONCTIONS (CRUD DIRECT)
+    // =====================================================
 
     switch (functionName) {
       case 'createSession':
@@ -95,230 +74,162 @@ export async function handleAdmin(req: Request, res: Response) {
       case 'addQuestions':
         return await addQuestions(profile.id, params, res)
       case 'setVisibility':
-        return await setVisibility(profile.id, params, res)
+        return await setVisibility(params, res)
       case 'closeRun':
-        return await closeRun(profile.id, params, res)
+        return await closeRun(params, res)
       case 'getStatistics':
-        return await getStatistics(profile.id, params, res)
+        return await getStatistics(params, res)
       default:
-        return res.status(400).json({
-          error: 'Fonction inconnue',
-          available: ['createSession', 'createParty', 'createRun', 'addQuestions', 'setVisibility', 'closeRun', 'getStatistics'],
-          timestamp: new Date().toISOString()
+        return res.status(400).json({ 
+          error: `Fonction inconnue: ${functionName}`,
+          available: ['createSession', 'createParty', 'createRun', 'addQuestions', 'setVisibility', 'closeRun', 'getStatistics']
         })
     }
 
   } catch (error: any) {
-    console.error(`[${new Date().toISOString()}] ERROR handleAdmin:`, error)
-    return res.status(500).json({
-      error: 'Erreur serveur',
-      details: error.message,
-      timestamp: new Date().toISOString()
+    console.error(`💥 CRASH SERVEUR handleAdmin:`, error)
+    // C'est ici que l'erreur 500 est générée proprement avec des détails
+    return res.status(500).json({ 
+      error: 'Erreur interne du serveur', 
+      details: error.message || 'Erreur inconnue' 
     })
   }
 }
 
-// ========== FONCTIONS ADMIN ==========
+// =====================================================
+// FONCTIONS MÉTIER (Utilisant Insert/Update standards)
+// =====================================================
 
-async function createSession(_adminId: string, params: any, res: Response) {
-  try {
-    const { game_key, title, description, is_paid, price_cfa } = params
-    if (!game_key || !title) {
-      return res.status(400).json({ error: 'game_key et title requis' })
-    }
+async function createSession(adminId: string, params: any, res: Response) {
+  const { game_key, title, description, is_paid, price_cfa } = params
+  
+  if (!game_key || !title) return res.status(400).json({ error: 'game_key et title requis' })
 
-    const { data: game, error: gameError } = await supabase
-      .from('games')
-      .select('id')
-      .eq('key_name', game_key)
-      .single()
+  // 1. Trouver le jeu
+  const { data: game } = await supabase.from('games').select('id').eq('key_name', game_key).maybeSingle()
+  if (!game) return res.status(404).json({ error: `Jeu non trouvé avec la clé: ${game_key}` })
 
-    if (gameError || !game) {
-      return res.status(404).json({ error: 'Jeu non trouvé', game_key })
-    }
+  // 2. Créer la session
+  const { data, error } = await supabase.from('game_sessions').insert({
+    game_id: game.id,
+    title,
+    description,
+    is_paid: is_paid || false,
+    price_cfa: price_cfa || 0,
+    created_by: adminId
+  }).select().single()
 
-    const { data: session, error } = await supabase
-      .from('game_sessions')
-      .insert({
-        game_id: game.id,
-        title,
-        description: description || null,
-        is_paid: is_paid || false,
-        price_cfa: price_cfa || 0,
-        created_by: _adminId
-      })
-      .select()
-      .single()
-
-    if (error) throw error
-
-    console.log(`✅ Session créée: ${session.id}`)
-    return res.json({ success: true, session_id: session.id, message: 'Session créée', timestamp: new Date().toISOString() })
-  } catch (error: any) {
-    console.error('ERROR createSession:', error)
-    return res.status(500).json({ error: 'Erreur création session', details: error.message })
-  }
+  if (error) throw error
+  return res.json({ success: true, session_id: data.id, message: 'Session créée' })
 }
 
-async function createParty(_adminId: string, params: any, res: Response) {
-  try {
-    const { session_id, title } = params
-    if (!session_id || !title) {
-      return res.status(400).json({ error: 'session_id et title requis' })
-    }
+async function createParty(adminId: string, params: any, res: Response) {
+  const { session_id, title, min_score, min_rank } = params
 
-    const { data, error } = await supabase.rpc('create_party_for_session', {
-      p_session_id: session_id,
-      p_title: title,
-      p_min_score: params.min_score || null,
-      p_min_rank: params.min_rank || null
-    })
-    if (error) throw error
+  if (!session_id || !title) return res.status(400).json({ error: 'session_id et title requis' })
 
-    console.log(`✅ Party créée: ${data}`)
-    return res.json({ success: true, party_id: data, message: 'Party créée', timestamp: new Date().toISOString() })
-  } catch (error: any) {
-    console.error('ERROR createParty:', error)
-    return res.status(500).json({ error: 'Erreur création party', details: error.message })
-  }
+  // Insert direct dans game_parties (remplace create_party_for_session RPC)
+  const { data, error } = await supabase.from('game_parties').insert({
+    session_id,
+    title,
+    min_score_required: min_score || 0,
+    min_rank_required: min_rank || null,
+    created_by: adminId,
+    status: 'waiting' // Assurez-vous que votre table a ce statut par défaut ou ajustez
+  }).select().single()
+
+  if (error) throw error
+  return res.json({ success: true, party_id: data.id, message: 'Partie créée' })
 }
 
-async function createRun(_adminId: string, params: any, res: Response) {
-  try {
-    const { party_id, title } = params
-    if (!party_id || !title) {
-      return res.status(400).json({ error: 'party_id et title requis' })
-    }
+async function createRun(adminId: string, params: any, res: Response) {
+  const { party_id, title } = params
 
-    const { data, error } = await supabase.rpc('create_run', {
-      p_party_id: party_id,
-      p_title: title
-    })
-    if (error) throw error
+  if (!party_id || !title) return res.status(400).json({ error: 'party_id et title requis' })
 
-    console.log(`✅ Run créé: ${data}`)
-    return res.json({ success: true, run_id: data, message: 'Run créé', timestamp: new Date().toISOString() })
-  } catch (error: any) {
-    console.error('ERROR createRun:', error)
-    return res.status(500).json({ error: 'Erreur création run', details: error.message })
-  }
+  // Insert direct dans game_runs (remplace create_run RPC)
+  const { data, error } = await supabase.from('game_runs').insert({
+    party_id,
+    title,
+    created_by: adminId,
+    is_visible: false,
+    is_closed: false,
+    is_started: false
+  }).select().single()
+
+  if (error) throw error
+  return res.json({ success: true, run_id: data.id, message: 'Run créé' })
 }
 
-async function addQuestions(_adminId: string, params: any, res: Response) {
-  try {
-    const { run_id, questions } = params
-    if (!run_id || !Array.isArray(questions)) {
-      return res.status(400).json({ error: 'run_id et questions requis' })
-    }
+async function addQuestions(adminId: string, params: any, res: Response) {
+  const { run_id, questions } = params
 
-    const { data, error } = await supabase
-      .from('run_questions')
-      .insert(questions.map((q: any) => ({
-        run_id,
-        question_text: q.question,
-        correct_answer: q.answer,
-        score: q.score || 10,
-        created_by: _adminId
-      })))
-      .select()
+  if (!run_id || !Array.isArray(questions)) return res.status(400).json({ error: 'run_id et tableau questions requis' })
 
-    if (error) throw error
+  // Préparation des données
+  const questionsToInsert = questions.map((q: any) => ({
+    run_id,
+    question_text: q.question,
+    correct_answer: q.answer, // Assurez-vous que c'est un booléen
+    score: q.score || 10,
+    created_by: adminId
+  }))
 
-    console.log(`✅ Questions ajoutées: ${data.length}`)
-    return res.json({ success: true, questions_added: data.length, message: `${data.length} question(s) ajoutée(s)`, timestamp: new Date().toISOString() })
-  } catch (error: any) {
-    console.error('ERROR addQuestions:', error)
-    return res.status(500).json({ error: 'Erreur ajout questions', details: error.message })
-  }
+  const { data, error } = await supabase.from('run_questions').insert(questionsToInsert).select()
+
+  if (error) throw error
+  return res.json({ success: true, count: data.length, message: `${data.length} questions ajoutées` })
 }
 
-async function setVisibility(_adminId: string, params: any, res: Response) {
-  try {
-    const { run_id, visible } = params
-    if (!run_id || typeof visible !== 'boolean') {
-      return res.status(400).json({ error: 'run_id et visible requis' })
-    }
+async function setVisibility(params: any, res: Response) {
+  const { run_id, visible } = params
+  
+  // Update direct (remplace set_run_visibility RPC)
+  const { error } = await supabase
+    .from('game_runs')
+    .update({ is_visible: visible })
+    .eq('id', run_id)
 
-    const { error } = await supabase.rpc('set_run_visibility', {
-      p_run_id: run_id,
-      p_visible: visible
-    })
-    if (error) throw error
-
-    console.log(`✅ Visibilité: ${visible}`)
-    return res.json({ success: true, message: visible ? 'Run visible' : 'Run masqué', timestamp: new Date().toISOString() })
-  } catch (error: any) {
-    console.error('ERROR setVisibility:', error)
-    return res.status(500).json({ error: 'Erreur visibilité', details: error.message })
-  }
+  if (error) throw error
+  return res.json({ success: true, message: visible ? 'Run visible' : 'Run masqué' })
 }
 
-async function closeRun(_adminId: string, params: any, res: Response) {
-  try {
-    const { run_id, closed } = params
-    if (!run_id || typeof closed !== 'boolean') {
-      return res.status(400).json({ error: 'run_id et closed requis' })
-    }
+async function closeRun(params: any, res: Response) {
+  const { run_id, closed } = params
 
-    const { error } = await supabase.rpc('set_run_closed', {
-      p_run_id: run_id,
-      p_closed: closed
-    })
-    if (error) throw error
+  // Update direct (remplace set_run_closed RPC)
+  const { error } = await supabase
+    .from('game_runs')
+    .update({ is_closed: closed })
+    .eq('id', run_id)
 
-    console.log(`✅ Run ${closed ? 'fermé' : 'réouvert'}`)
-    return res.json({ success: true, message: closed ? 'Run fermé' : 'Run réouvert', timestamp: new Date().toISOString() })
-  } catch (error: any) {
-    console.error('ERROR closeRun:', error)
-    return res.status(500).json({ error: 'Erreur fermeture', details: error.message })
-  }
+  if (error) throw error
+  return res.json({ success: true, message: closed ? 'Run fermé' : 'Run ouvert' })
 }
 
-async function getStatistics(_adminId: string, params: any, res: Response) {
-  try {
-    const { run_id } = params
-    if (!run_id) {
-      return res.status(400).json({ error: 'run_id requis' })
+async function getStatistics(params: any, res: Response) {
+  const { run_id } = params
+  if (!run_id) return res.status(400).json({ error: 'run_id requis' })
+
+  // Récupération parallèle des infos
+  const [runRes, qRes, aRes] = await Promise.all([
+    supabase.from('game_runs').select('*').eq('id', run_id).single(),
+    supabase.from('run_questions').select('*', { count: 'exact', head: true }).eq('run_id', run_id),
+    supabase.from('user_run_answers').select('*', { count: 'exact', head: true }).eq('run_id', run_id)
+  ])
+
+  if (runRes.error) throw runRes.error
+
+  return res.json({
+    success: true,
+    statistics: {
+      run_id,
+      title: runRes.data.title,
+      is_visible: runRes.data.is_visible,
+      is_closed: runRes.data.is_closed,
+      is_started: runRes.data.is_started,
+      total_questions: qRes.count || 0,
+      total_answers: aRes.count || 0
     }
-
-    const { data: run, error: runError } = await supabase
-      .from('game_runs')
-      .select('*')
-      .eq('id', run_id)
-      .single()
-    if (runError) throw runError
-
-    const { count: questionsCount } = await supabase
-      .from('run_questions')
-      .select('*', { count: 'exact', head: true })
-      .eq('run_id', run_id)
-
-    const { count: answersCount } = await supabase
-      .from('user_run_answers')
-      .select('*', { count: 'exact', head: true })
-      .eq('run_id', run_id)
-
-    const { count: playersCount } = await supabase
-      .from('party_players')
-      .select('*', { count: 'exact', head: true })
-      .eq('party_id', run.party_id)
-
-    return res.json({
-      success: true,
-      statistics: {
-        run_id,
-        title: run.title,
-        is_visible: run.is_visible,
-        is_closed: run.is_closed,
-        is_started: run.is_started,
-        total_questions: questionsCount || 0,
-        total_answers: answersCount || 0,
-        total_players: playersCount || 0
-      },
-      timestamp: new Date().toISOString()
-    })
-  } catch (error: any) {
-    console.error('ERROR getStatistics:', error)
-    return res.status(500).json({ error: 'Erreur stats', details: error.message })
-  }
+  })
 }
