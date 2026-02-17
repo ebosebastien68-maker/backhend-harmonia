@@ -120,7 +120,7 @@ export async function handleAdmin(req: Request, res: Response) {
 
 // ========== FONCTIONS ADMIN ==========
 
-async function createSession(adminId: string, params: any, res: Response) {
+async function createSession(_adminId: string, params: any, res: Response) {
   try {
     const { game_key, title, description, is_paid, price_cfa } = params
     if (!game_key || !title) {
