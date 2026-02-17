@@ -1,3 +1,7 @@
+// =====================================================
+// HANDLER ADMIN - VERSION DIAGNOSTIC PROFOND
+// =====================================================
+
 import { Request, Response } from 'express'
 import supabase from '../config/supabase'
 
@@ -24,46 +28,47 @@ export async function handleAdmin(req: Request, res: Response) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' })
     }
 
+    const uid = authData.user.id;
+
     // =====================================================
-    // ÉTAPE 2 : VÉRIFICATION DU RÔLE + DIAGNOSTIC RENDER
+    // ÉTAPE 2 : DIAGNOSTIC DE VISIBILITÉ (TEST RLS)
     // =====================================================
-    
-    // Diagnostic : On vérifie si le serveur a accès à la table en lecture générale
-    const { count: totalProfilesVisible } = await supabase
+    // On vérifie si le serveur "voit" au moins un profil dans la table
+    const { count: totalVisibles, error: testError } = await supabase
       .from('profiles')
       .select('*', { count: 'exact', head: true });
 
-    // Récupération du profil précis
+    console.log(`[DIAGNOSTIC RENDER] UID: ${uid}`);
+    console.log(`[DIAGNOSTIC RENDER] Profils accessibles par le serveur: ${totalVisibles ?? 0}`);
+    if (testError) console.error(`[DIAGNOSTIC RENDER] Erreur test visibilité:`, testError.message);
+
+    // =====================================================
+    // ÉTAPE 3 : VÉRIFICATION DU RÔLE
+    // =====================================================
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('id, role, nom, prenom')
-      .eq('id', authData.user.id)
+      .eq('id', uid)
       .maybeSingle()
-
-    // Logs de diagnostic pour tes logs Render
-    console.log(`[DIAGNOSTIC RENDER] UID Authentifié: ${authData.user.id}`);
-    console.log(`[DIAGNOSTIC RENDER] Profils accessibles au total: ${totalProfilesVisible ?? 0}`);
 
     if (profileError) {
       console.error(`❌ Erreur SQL Supabase:`, profileError.message);
-      return res.status(500).json({ error: 'Erreur SQL', details: profileError.message });
+      return res.status(500).json({ error: 'Erreur base de données', details: profileError.message });
     }
 
     if (!profile) {
-      console.error(`⛔ Profil introuvable pour l'UID: ${authData.user.id}`);
+      console.error(`⛔ Profil introuvable pour l'UID: ${uid}`);
       return res.status(403).json({ 
-        error: 'Accès refusé : Profil inexistant dans la table',
+        error: 'Accès refusé : Profil inexistant',
         debug: {
-          uid_tente: authData.user.id,
-          total_visibles: totalProfilesVisible ?? 0,
-          message: "Si total_visibles est 0, votre SERVICE_ROLE_KEY sur Render ne fonctionne pas ou la RLS bloque."
+          uid_tente: uid,
+          total_visibles: totalVisibles ?? 0,
+          info: "Si total_visibles est 0, la clé service_role est absente ou bloquée par la RLS."
         }
       })
     }
 
-    // =====================================================
-    // ÉTAPE 3 : NORMALISATION DU RÔLE
-    // =====================================================
+    // --- NORMALISATION DU RÔLE ---
     const rawRole = profile.role;
     const normalizedRole = rawRole?.toString().toLowerCase().trim();
     const allowedRoles = ['admin', 'adminpro', 'supreme'];
@@ -81,7 +86,7 @@ export async function handleAdmin(req: Request, res: Response) {
     console.log(`✅ Accès validé pour ${profile.prenom} (${normalizedRole})`)
 
     // =====================================================
-    // ÉTAPE 4 : ROUTAGE DES FONCTIONS (Switch)
+    // ÉTAPE 4 : ROUTAGE DES FONCTIONS
     // =====================================================
     switch (functionName) {
       case 'createSession': return await createSession(profile.id, params, res)
@@ -101,5 +106,112 @@ export async function handleAdmin(req: Request, res: Response) {
   }
 }
 
-// Les fonctions métier (createSession, etc.) restent les mêmes en dessous...
-    
+// =====================================================
+// FONCTIONS MÉTIER (INSERT / UPDATE DIRECTS)
+// =====================================================
+
+async function createSession(adminId: string, params: any, res: Response) {
+  const { game_key, title, description, is_paid, price_cfa } = params
+  if (!game_key || !title) return res.status(400).json({ error: 'game_key et title requis' })
+
+  const { data: game } = await supabase.from('games').select('id').eq('key_name', game_key).maybeSingle()
+  if (!game) return res.status(404).json({ error: 'Jeu non trouvé' })
+
+  const { data, error } = await supabase.from('game_sessions').insert({
+    game_id: game.id,
+    title,
+    description,
+    is_paid: !!is_paid,
+    price_cfa: price_cfa || 0,
+    created_by: adminId
+  }).select().single()
+
+  if (error) throw error
+  return res.json({ success: true, session_id: data.id })
+}
+
+async function createParty(adminId: string, params: any, res: Response) {
+  const { session_id, title, min_score, min_rank } = params
+  if (!session_id || !title) return res.status(400).json({ error: 'session_id et title requis' })
+
+  const { data, error } = await supabase.from('game_parties').insert({
+    session_id,
+    title,
+    min_score_required: min_score || 0,
+    min_rank_required: min_rank || null,
+    created_by: adminId,
+    status: 'waiting'
+  }).select().single()
+
+  if (error) throw error
+  return res.json({ success: true, party_id: data.id })
+}
+
+async function createRun(adminId: string, params: any, res: Response) {
+  const { party_id, title } = params
+  if (!party_id || !title) return res.status(400).json({ error: 'party_id et title requis' })
+
+  const { data, error } = await supabase.from('game_runs').insert({
+    party_id,
+    title,
+    created_by: adminId,
+    is_visible: false,
+    is_closed: false,
+    is_started: false
+  }).select().single()
+
+  if (error) throw error
+  return res.json({ success: true, run_id: data.id })
+}
+
+async function addQuestions(adminId: string, params: any, res: Response) {
+  const { run_id, questions } = params
+  if (!run_id || !Array.isArray(questions)) return res.status(400).json({ error: 'Paramètres invalides' })
+
+  const payload = questions.map((q: any) => ({
+    run_id,
+    question_text: q.question,
+    correct_answer: !!q.answer,
+    score: q.score || 10,
+    created_by: adminId
+  }))
+
+  const { data, error } = await supabase.from('run_questions').insert(payload).select()
+  if (error) throw error
+  return res.json({ success: true, count: data.length })
+}
+
+async function setVisibility(params: any, res: Response) {
+  const { run_id, visible } = params
+  const { error } = await supabase.from('game_runs').update({ is_visible: !!visible }).eq('id', run_id)
+  if (error) throw error
+  return res.json({ success: true })
+}
+
+async function closeRun(params: any, res: Response) {
+  const { run_id, closed } = params
+  const { error } = await supabase.from('game_runs').update({ is_closed: !!closed }).eq('id', run_id)
+  if (error) throw error
+  return res.json({ success: true })
+}
+
+async function getStatistics(params: any, res: Response) {
+  const { run_id } = params
+  if (!run_id) return res.status(400).json({ error: 'run_id requis' })
+
+  const [runRes, qRes, aRes] = await Promise.all([
+    supabase.from('game_runs').select('*').eq('id', run_id).single(),
+    supabase.from('run_questions').select('*', { count: 'exact', head: true }).eq('run_id', run_id),
+    supabase.from('user_run_answers').select('*', { count: 'exact', head: true }).eq('run_id', run_id)
+  ])
+
+  if (runRes.error) throw runRes.error
+  return res.json({
+    success: true,
+    statistics: {
+      ...runRes.data,
+      total_questions: qRes.count || 0,
+      total_answers: aRes.count || 0
+    }
+  })
+}
