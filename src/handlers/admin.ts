@@ -160,7 +160,7 @@ async function createSession(adminId: string, params: any, res: Response) {
   }
 }
 
-async function createParty(adminId: string, params: any, res: Response) {
+async function createParty(_adminId: string, params: any, res: Response) {
   try {
     const { session_id, title } = params
     if (!session_id || !title) {
@@ -183,7 +183,7 @@ async function createParty(adminId: string, params: any, res: Response) {
   }
 }
 
-async function createRun(adminId: string, params: any, res: Response) {
+async function createRun(_adminId: string, params: any, res: Response) {
   try {
     const { party_id, title } = params
     if (!party_id || !title) {
@@ -204,7 +204,7 @@ async function createRun(adminId: string, params: any, res: Response) {
   }
 }
 
-async function addQuestions(adminId: string, params: any, res: Response) {
+async function addQuestions(_adminId: string, params: any, res: Response) {
   try {
     const { run_id, questions } = params
     if (!run_id || !Array.isArray(questions)) {
@@ -232,7 +232,7 @@ async function addQuestions(adminId: string, params: any, res: Response) {
   }
 }
 
-async function setVisibility(adminId: string, params: any, res: Response) {
+async function setVisibility(_adminId: string, params: any, res: Response) {
   try {
     const { run_id, visible } = params
     if (!run_id || typeof visible !== 'boolean') {
@@ -253,7 +253,7 @@ async function setVisibility(adminId: string, params: any, res: Response) {
   }
 }
 
-async function closeRun(adminId: string, params: any, res: Response) {
+async function closeRun(_adminId: string, params: any, res: Response) {
   try {
     const { run_id, closed } = params
     if (!run_id || typeof closed !== 'boolean') {
@@ -274,7 +274,7 @@ async function closeRun(adminId: string, params: any, res: Response) {
   }
 }
 
-async function getStatistics(adminId: string, params: any, res: Response) {
+async function getStatistics(_adminId: string, params: any, res: Response) {
   try {
     const { run_id } = params
     if (!run_id) {
