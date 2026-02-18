@@ -136,6 +136,11 @@ async function joinSession(userId: string, params: any, res: Response) {
       party = newParty
     }
 
+    // Vérifier que party existe bien
+    if (!party) {
+      return res.status(500).json({ error: 'Impossible de créer ou trouver une party' })
+    }
+
     // Ajouter joueur
     const { error: playerError } = await supabase
       .from('party_players')
@@ -220,7 +225,7 @@ async function getQuestions(userId: string, params: any, res: Response) {
   }
 }
 
-async function submitAnswer(userId: string, params: any, res: Response) {
+async function submitAnswer(_userId: string, params: any, res: Response) {
   const { run_question_id, answer } = params
 
   if (!run_question_id || typeof answer !== 'boolean') {
