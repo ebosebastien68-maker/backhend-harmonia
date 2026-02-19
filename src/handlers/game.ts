@@ -1,5 +1,9 @@
 // =====================================================
-// HANDLER GAME - VERSION MISE À JOUR
+// HANDLER GAME - VERSION SÉCURISÉE
+// Changements vs version précédente :
+//   + listVisibleRuns       → polling frontend (runs is_visible=true)
+//   + getQuestions          → lit view_run_questions (correct_answer masqué si run non fermé)
+//   + getQuestions          → fonctionne aussi après fermeture (reveal_answers=true via trigger)
 // =====================================================
 
 import { Request, Response } from 'express'
@@ -23,11 +27,12 @@ export async function handleGame(req: Request, res: Response) {
 
   try {
     switch (functionName) {
-      case 'listSessions':   return await listSessions(params, res)
-      case 'joinSession':    return await joinSession(user_id, params, res)
-      case 'getQuestions':   return await getQuestions(user_id, params, res)
-      case 'submitAnswer':   return await submitAnswer(user_id, params, res)
-      case 'getLeaderboard': return await getLeaderboard(user_id, params, res)
+      case 'listSessions':    return await listSessions(params, res)
+      case 'joinSession':     return await joinSession(user_id, params, res)
+      case 'listVisibleRuns': return await listVisibleRuns(user_id, params, res)
+      case 'getQuestions':    return await getQuestions(user_id, params, res)
+      case 'submitAnswer':    return await submitAnswer(user_id, params, res)
+      case 'getLeaderboard':  return await getLeaderboard(user_id, params, res)
       default:
         return res.status(400).json({ error: `Action inconnue: ${functionName}` })
     }
@@ -75,10 +80,7 @@ async function listSessions(params: any, res: Response) {
 
 // =====================================================
 // JOIN SESSION
-// Corrections :
-//   1. Anti double-débit : vérifier si déjà dans la party avant de payer
-//   2. Utiliser la party initiale créée par le trigger BDD (is_initial = true)
-//   3. Vérifier min_score / min_rank pour les parties non-initiales
+// Anti double-débit + utilise party initiale du trigger BDD
 // =====================================================
 
 async function joinSession(userId: string, params: any, res: Response) {
@@ -93,7 +95,7 @@ async function joinSession(userId: string, params: any, res: Response) {
   }
 
   try {
-    // --- 1. Récupérer la session ---
+    // 1. Récupérer la session
     const { data: session, error: sessionError } = await supabase
       .from('game_sessions')
       .select('id, is_paid, price_cfa')
@@ -104,11 +106,10 @@ async function joinSession(userId: string, params: any, res: Response) {
       return res.status(404).json({ error: 'Session non trouvée' })
     }
 
-    // --- 2. Trouver la party cible (initiale ou demandée) ---
+    // 2. Trouver la party cible
     let targetPartyId: string
 
     if (requestedPartyId) {
-      // Party spécifique demandée → vérifier min_score / min_rank
       const { data: party, error: partyError } = await supabase
         .from('game_parties')
         .select('id, min_score, min_rank, session_id')
@@ -120,7 +121,7 @@ async function joinSession(userId: string, params: any, res: Response) {
         return res.status(404).json({ error: 'Party non trouvée pour cette session' })
       }
 
-      // Vérifier min_score si défini
+      // Vérifier min_score
       if (party.min_score !== null && party.min_score > 0) {
         const { data: playerStats } = await supabase
           .from('party_players')
@@ -138,9 +139,8 @@ async function joinSession(userId: string, params: any, res: Response) {
         }
       }
 
-      // Vérifier min_rank si défini
+      // Vérifier min_rank
       if (party.min_rank !== null) {
-        // Rang dans la party initiale de cette session
         const { data: initialParty } = await supabase
           .from('game_parties')
           .select('id')
@@ -158,7 +158,7 @@ async function joinSession(userId: string, params: any, res: Response) {
           const userRank = (rankedPlayers || []).findIndex(p => p.user_id === userId) + 1
           if (userRank === 0 || userRank > party.min_rank) {
             return res.status(403).json({
-              error: `Rang minimum requis: top ${party.min_rank}. Votre rang actuel: ${userRank || 'non classé'}`
+              error: `Rang minimum requis: top ${party.min_rank}. Votre rang: ${userRank || 'non classé'}`
             })
           }
         }
@@ -167,7 +167,7 @@ async function joinSession(userId: string, params: any, res: Response) {
       targetPartyId = party.id
 
     } else {
-      // Utiliser la party initiale créée par le trigger BDD
+      // Party initiale créée automatiquement par le trigger BDD
       const { data: initialParty, error: initError } = await supabase
         .from('game_parties')
         .select('id')
@@ -182,7 +182,7 @@ async function joinSession(userId: string, params: any, res: Response) {
       targetPartyId = initialParty.id
     }
 
-    // --- 3. Vérifier si déjà dans la party (anti double-débit) ---
+    // 3. Vérifier si déjà dans la party (anti double-débit)
     const { data: existingPlayer } = await supabase
       .from('party_players')
       .select('id')
@@ -191,28 +191,27 @@ async function joinSession(userId: string, params: any, res: Response) {
       .maybeSingle()
 
     if (existingPlayer) {
-      return res.json({ success: true, message: 'Déjà inscrit dans cette party' })
+      return res.json({ success: true, message: 'Déjà inscrit dans cette session' })
     }
 
-    // --- 4. Gestion paiement (seulement si pas encore dans la session) ---
+    // 4. Gestion paiement (seulement si première party de la session)
     if (session.is_paid && session.price_cfa > 0) {
-      // Vérifier si l'utilisateur est déjà dans n'importe quelle party de cette session
-      const { data: anyPartyPlayer } = await supabase
-        .from('party_players')
+      const sessionPartiesRes = await supabase
+        .from('game_parties')
         .select('id')
-        .eq('user_id', userId)
-        .in(
-          'party_id',
-          (
-            await supabase
-              .from('game_parties')
-              .select('id')
-              .eq('session_id', session_id)
-          ).data?.map((p: any) => p.id) || []
-        )
-        .maybeSingle()
+        .eq('session_id', session_id)
 
-      // Ne débiter que si c'est la première party de cette session
+      const sessionPartyIds = sessionPartiesRes.data?.map((p: any) => p.id) || []
+
+      const { data: anyPartyPlayer } = sessionPartyIds.length > 0
+        ? await supabase
+            .from('party_players')
+            .select('id')
+            .eq('user_id', userId)
+            .in('party_id', sessionPartyIds)
+            .maybeSingle()
+        : { data: null }
+
       if (!anyPartyPlayer) {
         const { data: profile } = await supabase
           .from('profiles')
@@ -237,7 +236,7 @@ async function joinSession(userId: string, params: any, res: Response) {
       }
     }
 
-    // --- 5. Ajouter le joueur dans la party ---
+    // 5. Ajouter le joueur dans la party
     const { error: playerError } = await supabase
       .from('party_players')
       .insert({ party_id: targetPartyId, user_id: userId, score: 0 })
@@ -255,7 +254,77 @@ async function joinSession(userId: string, params: any, res: Response) {
 }
 
 // =====================================================
+// LIST VISIBLE RUNS
+// Appelé par le polling frontend toutes les 3s.
+// Retourne les runs is_visible=true des parties
+// où le joueur est inscrit (pour cette session).
+//
+// Logique du cycle :
+//   is_visible=false → le joueur ne voit rien (waiting)
+//   is_visible=true, is_closed=false → question en direct
+//   is_visible=true, is_closed=true  → résultats disponibles
+// =====================================================
+
+async function listVisibleRuns(userId: string, params: any, res: Response) {
+  const { session_id } = params
+
+  if (!session_id || !isValidUUID(session_id)) {
+    return res.status(400).json({ error: 'session_id invalide' })
+  }
+
+  try {
+    // Trouver les parties de cette session où le joueur est inscrit
+    const { data: playerParties, error: ppError } = await supabase
+      .from('party_players')
+      .select('party_id')
+      .eq('user_id', userId)
+      .in(
+        'party_id',
+        (
+          await supabase
+            .from('game_parties')
+            .select('id')
+            .eq('session_id', session_id)
+        ).data?.map((p: any) => p.id) || []
+      )
+
+    if (ppError) throw ppError
+
+    const partyIds = playerParties?.map((p: any) => p.party_id) || []
+
+    if (partyIds.length === 0) {
+      return res.json({ success: true, runs: [] })
+    }
+
+    // Récupérer les runs visibles de ces parties
+    // RLS game_runs_select_strict garantit que is_visible=false est invisible côté BDD
+    // On filtre also côté serveur pour être explicite
+    const { data: runs, error: runsError } = await supabase
+      .from('game_runs')
+      .select('id, title, is_visible, is_closed, is_started')
+      .in('party_id', partyIds)
+      .eq('is_visible', true)
+      .order('created_at', { ascending: true })
+
+    if (runsError) throw runsError
+
+    return res.json({ success: true, runs: runs || [] })
+
+  } catch (error: any) {
+    console.error('ERROR listVisibleRuns:', error)
+    return res.status(500).json({ error: 'Erreur liste runs', details: error.message })
+  }
+}
+
+// =====================================================
 // GET QUESTIONS
+// ✅ Lit depuis view_run_questions (vue sécurisée BDD)
+//    - Si run non fermé  → correct_answer = NULL (masqué par la vue)
+//    - Si run fermé      → correct_answer = true/false (révélé par trigger)
+//
+// Utilisé dans deux contextes :
+//   1. Avant réponse (is_closed=false) → afficher la question sans réponse
+//   2. Après fermeture (is_closed=true) → afficher la bonne réponse + score
 // =====================================================
 
 async function getQuestions(userId: string, params: any, res: Response) {
@@ -266,17 +335,23 @@ async function getQuestions(userId: string, params: any, res: Response) {
   }
 
   try {
+    // Vérifier le run et l'appartenance du joueur
     const { data: run, error: runError } = await supabase
       .from('game_runs')
-      .select('is_visible, is_closed, party_id')
+      .select('is_visible, is_closed, party_id, reveal_answers')
       .eq('id', run_id)
       .maybeSingle()
 
     if (runError) throw runError
     if (!run) return res.status(404).json({ error: 'Run non trouvé' })
-    if (!run.is_visible) return res.status(403).json({ error: 'Run non visible' })
-    if (run.is_closed) return res.status(403).json({ error: 'Run fermé' })
 
+    // Un run non visible n'est accessible qu'après fermeture (pour l'historique)
+    // mais le polling ne devrait jamais envoyer un run non visible
+    if (!run.is_visible && !run.is_closed) {
+      return res.status(403).json({ error: 'Run non visible' })
+    }
+
+    // Vérifier que le joueur est bien inscrit dans la party
     const { data: player } = await supabase
       .from('party_players')
       .select('id')
@@ -288,28 +363,44 @@ async function getQuestions(userId: string, params: any, res: Response) {
       return res.status(403).json({ error: "Rejoignez d'abord la session" })
     }
 
+    // Lire depuis view_run_questions :
+    // → correct_answer est NULL si reveal_answers=false (joueur ne peut pas tricher)
+    // → correct_answer est true/false si reveal_answers=true (run fermé par trigger)
     const { data: questions, error: qError } = await supabase
-      .from('run_questions')
-      .select('id, question_text, score')
+      .from('view_run_questions')
+      .select('id, question_text, score, correct_answer')
       .eq('run_id', run_id)
       .order('created_at', { ascending: true })
 
     if (qError) throw qError
 
+    // Récupérer les réponses déjà données par ce joueur
     const { data: answers } = await supabase
       .from('user_run_answers')
-      .select('run_question_id')
+      .select('run_question_id, answer, score_awarded')
       .eq('run_id', run_id)
       .eq('user_id', userId)
 
-    const answeredIds = new Set(answers?.map((a) => a.run_question_id) || [])
+    const answersMap = new Map(
+      (answers || []).map(a => [a.run_question_id, { answer: a.answer, score_awarded: a.score_awarded }])
+    )
 
-    const questionsWithStatus = questions?.map((q) => ({
-      ...q,
-      answered: answeredIds.has(q.id)
+    const questionsWithStatus = (questions || []).map(q => ({
+      id:            q.id,
+      question_text: q.question_text,
+      score:         q.score,
+      correct_answer: q.correct_answer, // null si run pas encore fermé
+      answered:      answersMap.has(q.id),
+      my_answer:     answersMap.get(q.id)?.answer ?? null,
+      score_awarded: answersMap.get(q.id)?.score_awarded ?? null,
     }))
 
-    return res.json({ success: true, questions: questionsWithStatus || [] })
+    return res.json({
+      success:        true,
+      questions:      questionsWithStatus,
+      is_closed:      run.is_closed,
+      reveal_answers: run.reveal_answers,
+    })
 
   } catch (error: any) {
     console.error('ERROR getQuestions:', error)
@@ -319,10 +410,7 @@ async function getQuestions(userId: string, params: any, res: Response) {
 
 // =====================================================
 // SUBMIT ANSWER
-// Note : auth.uid() est géré côté frontend (Supabase Auth).
-// Le backend appelle la RPC avec le service role ; la RPC elle-même
-// utilise auth.uid() qui sera NULL ici → cette fonction est intentionnellement
-// déléguée au frontend. Ce handler reste pour compatibilité ou usage admin.
+// Note : auth.uid() géré côté frontend (Supabase Auth).
 // =====================================================
 
 async function submitAnswer(_userId: string, params: any, res: Response) {
@@ -343,7 +431,7 @@ async function submitAnswer(_userId: string, params: any, res: Response) {
         return res.status(400).json({ error: 'Déjà répondu à cette question' })
       }
       if (error.message.includes('closed')) {
-        return res.status(403).json({ error: 'Run fermé' })
+        return res.status(403).json({ error: 'Run fermé — plus de réponses acceptées' })
       }
       if (error.message.includes('not participant')) {
         return res.status(403).json({ error: "Vous n'êtes pas participant de cette party" })
@@ -361,7 +449,7 @@ async function submitAnswer(_userId: string, params: any, res: Response) {
 
 // =====================================================
 // GET LEADERBOARD
-// Score spécifique au run (agréger user_run_answers pour ce run)
+// Score spécifique au run (user_run_answers.score_awarded)
 // et non le score cumulé de la party
 // =====================================================
 
@@ -375,14 +463,14 @@ async function getLeaderboard(userId: string, params: any, res: Response) {
   try {
     const { data: run, error: runError } = await supabase
       .from('game_runs')
-      .select('party_id')
+      .select('party_id, is_closed')
       .eq('id', run_id)
       .maybeSingle()
 
     if (runError) throw runError
     if (!run) return res.status(404).json({ error: 'Run non trouvé' })
 
-    // Récupérer les scores spécifiques à ce run
+    // Scores spécifiques à ce run
     const { data: runScores, error: scoresError } = await supabase
       .from('user_run_answers')
       .select('user_id, score_awarded')
@@ -390,13 +478,12 @@ async function getLeaderboard(userId: string, params: any, res: Response) {
 
     if (scoresError) throw scoresError
 
-    // Agréger les scores par user pour ce run
     const scoreMap = new Map<string, number>()
     for (const row of runScores || []) {
       scoreMap.set(row.user_id, (scoreMap.get(row.user_id) ?? 0) + row.score_awarded)
     }
 
-    // Récupérer les joueurs de la party avec leurs profils
+    // Joueurs de la party avec profils
     const { data: players, error: playersError } = await supabase
       .from('party_players')
       .select(`
@@ -407,20 +494,19 @@ async function getLeaderboard(userId: string, params: any, res: Response) {
 
     if (playersError) throw playersError
 
-    // Construire et trier le leaderboard par score run
     const leaderboard = (players || [])
       .map((p: any) => ({
-        user_id: p.user_id,
-        run_score: scoreMap.get(p.user_id) ?? 0,
-        nom: p.profiles?.nom || 'Joueur',
-        prenom: p.profiles?.prenom || '',
-        avatar_url: p.profiles?.avatar_url ?? null,
-        is_current_user: p.user_id === userId
+        user_id:         p.user_id,
+        run_score:       scoreMap.get(p.user_id) ?? 0,
+        nom:             p.profiles?.nom    || 'Joueur',
+        prenom:          p.profiles?.prenom || '',
+        avatar_url:      p.profiles?.avatar_url ?? null,
+        is_current_user: p.user_id === userId,
       }))
       .sort((a, b) => b.run_score - a.run_score)
       .map((p, index) => ({ rank: index + 1, ...p }))
 
-    return res.json({ success: true, leaderboard })
+    return res.json({ success: true, leaderboard, is_closed: run.is_closed })
 
   } catch (error: any) {
     console.error('ERROR getLeaderboard:', error)
