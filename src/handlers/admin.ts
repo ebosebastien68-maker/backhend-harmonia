@@ -1,5 +1,13 @@
 // =====================================================
-// HANDLER ADMIN - VERSION MISE À JOUR
+// HANDLER ADMIN - VERSION SÉCURISÉE
+// Changements vs version précédente :
+//   + setStarted          → étape 1 du cycle (is_started = true)
+//   + setVisibility       → étape 2 (is_visible = true = top départ)
+//   + closeRun            → étape 3 (is_closed = true → trigger BDD → reveal_answers = true)
+//   + listRunQuestions    → liste les questions d'un run (avec correct_answer visible côté admin)
+//   + deleteSession       → suppression session
+//   + deleteParty         → suppression party
+//   ~ addQuestions        → bloque si is_started=true (et non seulement is_started)
 // =====================================================
 
 import { Request, Response } from 'express'
@@ -37,7 +45,6 @@ export async function handleAdmin(req: Request, res: Response) {
       .maybeSingle()
 
     if (profileError || !profile) {
-      console.error(`⛔ Profil introuvable: ${authData.user.id}`)
       return res.status(403).json({ error: 'Profil inexistant' })
     }
 
@@ -58,35 +65,37 @@ export async function handleAdmin(req: Request, res: Response) {
     if (functionName === 'login') {
       return res.json({
         success: true,
-        user: {
-          id: profile.id,
-          nom: profile.nom,
-          prenom: profile.prenom,
-          role: normalizedRole
-        }
+        user: { id: profile.id, nom: profile.nom, prenom: profile.prenom, role: normalizedRole }
       })
     }
 
-    // ========== ROUTAGE DES FONCTIONS ==========
+    // ========== ROUTAGE ==========
     switch (functionName) {
-      case 'createSession':  return await createSession(profile.id, params, res)
-      case 'createParty':    return await createParty(profile.id, params, res)
-      case 'createRun':      return await createRun(profile.id, params, res)
-      case 'addQuestions':   return await addQuestions(profile.id, params, res)
-      case 'setVisibility':  return await setVisibility(params, res)
-      case 'closeRun':       return await closeRun(params, res)
-      case 'getStatistics':  return await getStatistics(params, res)
-      case 'listSessions':   return await listSessions(params, res)
-      case 'listParties':    return await listParties(params, res)
-      case 'listRuns':       return await listRuns(params, res)
-      case 'getPartyPlayers': return await getPartyPlayers(params, res)
-      case 'deleteQuestion': return await deleteQuestion(params, res)
-      case 'updateRun':      return await updateRun(params, res)
-      case 'deleteRun':      return await deleteRun(params, res)
-      case 'updateSession':  return await updateSession(params, res)
-      case 'deleteSession':  return await deleteSession(params, res)
-      case 'updateParty':    return await updateParty(params, res)
-      case 'deleteParty':    return await deleteParty(params, res)
+      // Création
+      case 'createSession':     return await createSession(profile.id, params, res)
+      case 'createParty':       return await createParty(profile.id, params, res)
+      case 'createRun':         return await createRun(profile.id, params, res)
+      case 'addQuestions':      return await addQuestions(profile.id, params, res)
+
+      // Cycle de vie du run (3 étapes)
+      case 'setStarted':        return await setStarted(params, res)      // Étape 1
+      case 'setVisibility':     return await setVisibility(params, res)   // Étape 2 : top départ
+      case 'closeRun':          return await closeRun(params, res)        // Étape 3 : fermer + révéler
+
+      // Lecture
+      case 'listSessions':      return await listSessions(params, res)
+      case 'listParties':       return await listParties(params, res)
+      case 'listRuns':          return await listRuns(params, res)
+      case 'listRunQuestions':  return await listRunQuestions(params, res)
+      case 'getStatistics':     return await getStatistics(params, res)
+      case 'getPartyPlayers':   return await getPartyPlayers(params, res)
+
+      // Suppression
+      case 'deleteSession':     return await deleteSession(params, res)
+      case 'deleteParty':       return await deleteParty(params, res)
+      case 'deleteRun':         return await deleteRun(params, res)
+      case 'deleteQuestion':    return await deleteQuestion(params, res)
+
       default:
         return res.status(400).json({ error: `Fonction inconnue: ${functionName}` })
     }
@@ -99,7 +108,6 @@ export async function handleAdmin(req: Request, res: Response) {
 
 // =====================================================
 // CREATE SESSION
-// Ajouts : section_id optionnel + validation prix cohérent
 // =====================================================
 
 async function createSession(adminId: string, params: any, res: Response) {
@@ -109,17 +117,12 @@ async function createSession(adminId: string, params: any, res: Response) {
     return res.status(400).json({ error: 'game_key et title requis' })
   }
 
-  // Validation cohérence paiement
   if (is_paid && (!price_cfa || price_cfa <= 0)) {
-    return res.status(400).json({
-      error: 'price_cfa doit être supérieur à 0 si la session est payante'
-    })
+    return res.status(400).json({ error: 'price_cfa doit être > 0 si la session est payante' })
   }
 
   if (!is_paid && price_cfa > 0) {
-    return res.status(400).json({
-      error: 'price_cfa doit être 0 si la session est gratuite (is_paid = false)'
-    })
+    return res.status(400).json({ error: 'price_cfa doit être 0 si la session est gratuite' })
   }
 
   if (section_id && !isValidUUID(section_id)) {
@@ -133,11 +136,8 @@ async function createSession(adminId: string, params: any, res: Response) {
       .eq('key_name', game_key)
       .maybeSingle()
 
-    if (!game) {
-      return res.status(404).json({ error: 'Jeu non trouvé', game_key })
-    }
+    if (!game) return res.status(404).json({ error: 'Jeu non trouvé', game_key })
 
-    // Vérifier que la section appartient bien à ce jeu si fournie
     if (section_id) {
       const { data: section } = await supabase
         .from('game_sections')
@@ -146,21 +146,19 @@ async function createSession(adminId: string, params: any, res: Response) {
         .eq('game_id', game.id)
         .maybeSingle()
 
-      if (!section) {
-        return res.status(404).json({ error: 'Section non trouvée pour ce jeu' })
-      }
+      if (!section) return res.status(404).json({ error: 'Section non trouvée pour ce jeu' })
     }
 
     const { data, error } = await supabase
       .from('game_sessions')
       .insert({
-        game_id: game.id,
+        game_id:     game.id,
         title,
         description: description || null,
-        is_paid: !!is_paid,
-        price_cfa: is_paid ? price_cfa : 0,
-        section_id: section_id || null,
-        created_by: adminId
+        is_paid:     !!is_paid,
+        price_cfa:   is_paid ? price_cfa : 0,
+        section_id:  section_id || null,
+        created_by:  adminId
       })
       .select()
       .single()
@@ -198,8 +196,8 @@ async function createParty(adminId: string, params: any, res: Response) {
         session_id,
         title,
         is_initial: false,
-        min_score: min_score ?? 0,
-        min_rank: min_rank ?? null,
+        min_score:  min_score ?? 0,
+        min_rank:   min_rank ?? null,
         created_by: adminId
       })
       .select()
@@ -237,10 +235,11 @@ async function createRun(adminId: string, params: any, res: Response) {
       .insert({
         party_id,
         title,
-        created_by: adminId,
-        is_visible: false,
-        is_closed: false,
-        is_started: false
+        created_by:     adminId,
+        is_visible:     false,
+        is_closed:      false,
+        is_started:     false,
+        reveal_answers: false
       })
       .select()
       .single()
@@ -258,6 +257,7 @@ async function createRun(adminId: string, params: any, res: Response) {
 
 // =====================================================
 // ADD QUESTIONS
+// Bloqué si run déjà visible ou démarré
 // =====================================================
 
 async function addQuestions(adminId: string, params: any, res: Response) {
@@ -271,36 +271,34 @@ async function addQuestions(adminId: string, params: any, res: Response) {
     return res.status(400).json({ error: 'run_id invalide' })
   }
 
-  // Vérifier que le run n'est pas encore démarré
-  const { data: run } = await supabase
-    .from('game_runs')
-    .select('is_started')
-    .eq('id', run_id)
-    .maybeSingle()
-
-  if (!run) return res.status(404).json({ error: 'Run non trouvé' })
-  if (run.is_started) {
-    return res.status(403).json({ error: 'Impossible d\'ajouter des questions : le run a déjà démarré' })
-  }
-
   try {
+    const { data: run } = await supabase
+      .from('game_runs')
+      .select('is_started, is_visible')
+      .eq('id', run_id)
+      .maybeSingle()
+
+    if (!run) return res.status(404).json({ error: 'Run non trouvé' })
+
+    if (run.is_started || run.is_visible) {
+      return res.status(403).json({
+        error: 'Impossible d\'ajouter des questions : le run est déjà démarré ou visible'
+      })
+    }
+
     const payload = questions.map((q: any) => ({
       run_id,
-      question_text: q.question,
+      question_text:  q.question,
       correct_answer: !!q.answer,
-      score: q.score ?? 10,
-      created_by: adminId
+      score:          q.score ?? 10,
+      created_by:     adminId
     }))
 
     const { data, error } = await supabase.from('run_questions').insert(payload).select()
     if (error) throw error
 
     console.log(`✅ ${data.length} questions ajoutées`)
-    return res.json({
-      success: true,
-      count: data.length,
-      message: `${data.length} question(s) ajoutée(s)`
-    })
+    return res.json({ success: true, count: data.length, message: `${data.length} question(s) ajoutée(s)` })
 
   } catch (error: any) {
     console.error('ERROR addQuestions:', error)
@@ -309,7 +307,51 @@ async function addQuestions(adminId: string, params: any, res: Response) {
 }
 
 // =====================================================
-// SET VISIBILITY
+// SET STARTED — ÉTAPE 1
+// L'admin prépare le run. La question est prête mais
+// personne ne la voit encore (is_visible reste false).
+// =====================================================
+
+async function setStarted(params: any, res: Response) {
+  const { run_id, started } = params
+
+  if (!run_id || typeof started !== 'boolean') {
+    return res.status(400).json({ error: 'run_id et started (boolean) requis' })
+  }
+
+  try {
+    // Vérifier qu'il y a au moins une question avant de démarrer
+    if (started) {
+      const { count } = await supabase
+        .from('run_questions')
+        .select('*', { count: 'exact', head: true })
+        .eq('run_id', run_id)
+
+      if (!count || count === 0) {
+        return res.status(400).json({ error: 'Impossible de démarrer : aucune question dans ce run' })
+      }
+    }
+
+    const { error } = await supabase
+      .from('game_runs')
+      .update({ is_started: started })
+      .eq('id', run_id)
+
+    if (error) throw error
+
+    console.log(`✅ is_started = ${started} pour run: ${run_id}`)
+    return res.json({ success: true, message: started ? 'Run démarré (prêt à lancer)' : 'Run réinitialisé' })
+
+  } catch (error: any) {
+    console.error('ERROR setStarted:', error)
+    return res.status(500).json({ error: 'Erreur démarrage run', details: error.message })
+  }
+}
+
+// =====================================================
+// SET VISIBILITY — ÉTAPE 2 (TOP DÉPART)
+// is_visible = true → tous les joueurs voient la question
+// simultanément via le polling frontend.
 // =====================================================
 
 async function setVisibility(params: any, res: Response) {
@@ -320,13 +362,33 @@ async function setVisibility(params: any, res: Response) {
   }
 
   try {
+    // Vérifier que le run est démarré avant de le rendre visible
+    if (visible) {
+      const { data: run } = await supabase
+        .from('game_runs')
+        .select('is_started, is_closed')
+        .eq('id', run_id)
+        .maybeSingle()
+
+      if (!run) return res.status(404).json({ error: 'Run non trouvé' })
+
+      if (!run.is_started) {
+        return res.status(400).json({ error: 'Démarrez le run (setStarted) avant de le rendre visible' })
+      }
+
+      if (run.is_closed) {
+        return res.status(400).json({ error: 'Run déjà fermé — impossible de le rendre visible' })
+      }
+    }
+
     const { error } = await supabase.rpc('set_run_visibility', {
-      p_run_id: run_id,
+      p_run_id:  run_id,
       p_visible: visible
     })
     if (error) throw error
 
-    return res.json({ success: true, message: visible ? 'Run visible' : 'Run masqué' })
+    console.log(`✅ is_visible = ${visible} pour run: ${run_id}`)
+    return res.json({ success: true, message: visible ? 'Run visible — joueurs notifiés par polling' : 'Run masqué' })
 
   } catch (error: any) {
     console.error('ERROR setVisibility:', error)
@@ -335,7 +397,9 @@ async function setVisibility(params: any, res: Response) {
 }
 
 // =====================================================
-// CLOSE RUN
+// CLOSE RUN — ÉTAPE 3 (FERMER + RÉVÉLER)
+// is_closed = true → trigger BDD → reveal_answers = true
+// Les joueurs voient automatiquement la bonne réponse + scores.
 // =====================================================
 
 async function closeRun(params: any, res: Response) {
@@ -352,7 +416,14 @@ async function closeRun(params: any, res: Response) {
     })
     if (error) throw error
 
-    return res.json({ success: true, message: closed ? 'Run fermé' : 'Run réouvert' })
+    // Le trigger sync_reveal_on_close se charge de passer reveal_answers=true automatiquement
+    console.log(`✅ is_closed = ${closed} pour run: ${run_id} | reveal_answers géré par trigger BDD`)
+    return res.json({
+      success: true,
+      message: closed
+        ? 'Run fermé — bonne réponse et scores révélés aux joueurs'
+        : 'Run réouvert — réponses acceptées à nouveau'
+    })
 
   } catch (error: any) {
     console.error('ERROR closeRun:', error)
@@ -361,58 +432,7 @@ async function closeRun(params: any, res: Response) {
 }
 
 // =====================================================
-// GET STATISTICS
-// =====================================================
-
-async function getStatistics(params: any, res: Response) {
-  const { run_id } = params
-
-  if (!run_id || !isValidUUID(run_id)) {
-    return res.status(400).json({ error: 'run_id invalide' })
-  }
-
-  try {
-    const { data: run, error: runError } = await supabase
-      .from('game_runs')
-      .select('*')
-      .eq('id', run_id)
-      .maybeSingle()
-
-    if (runError) throw runError
-    if (!run) return res.status(404).json({ error: 'Run introuvable' })
-
-    const [
-      { count: questionsCount },
-      { count: answersCount },
-      { count: playersCount }
-    ] = await Promise.all([
-      supabase.from('run_questions').select('*', { count: 'exact', head: true }).eq('run_id', run_id),
-      supabase.from('user_run_answers').select('*', { count: 'exact', head: true }).eq('run_id', run_id),
-      supabase.from('party_players').select('*', { count: 'exact', head: true }).eq('party_id', run.party_id)
-    ])
-
-    return res.json({
-      success: true,
-      statistics: {
-        id: run.id,
-        title: run.title,
-        is_visible: run.is_visible,
-        is_closed: run.is_closed,
-        is_started: run.is_started,
-        total_questions: questionsCount || 0,
-        total_answers: answersCount || 0,
-        total_players: playersCount || 0
-      }
-    })
-
-  } catch (error: any) {
-    console.error('ERROR getStatistics:', error)
-    return res.status(500).json({ error: 'Erreur stats', details: error.message })
-  }
-}
-
-// =====================================================
-// LIST SESSIONS (admin : toutes les sessions d'un jeu)
+// LIST SESSIONS (admin)
 // =====================================================
 
 async function listSessions(params: any, res: Response) {
@@ -457,7 +477,7 @@ async function listSessions(params: any, res: Response) {
 }
 
 // =====================================================
-// LIST PARTIES (par session)
+// LIST PARTIES
 // =====================================================
 
 async function listParties(params: any, res: Response) {
@@ -485,7 +505,7 @@ async function listParties(params: any, res: Response) {
 }
 
 // =====================================================
-// LIST RUNS (par party)
+// LIST RUNS
 // =====================================================
 
 async function listRuns(params: any, res: Response) {
@@ -498,7 +518,7 @@ async function listRuns(params: any, res: Response) {
   try {
     const { data: runs, error } = await supabase
       .from('game_runs')
-      .select('id, title, is_visible, is_closed, is_started, created_by, created_at')
+      .select('id, title, is_visible, is_closed, is_started, reveal_answers, created_by, created_at')
       .eq('party_id', party_id)
       .order('created_at', { ascending: true })
 
@@ -509,6 +529,88 @@ async function listRuns(params: any, res: Response) {
   } catch (error: any) {
     console.error('ERROR listRuns:', error)
     return res.status(500).json({ error: 'Erreur liste runs', details: error.message })
+  }
+}
+
+// =====================================================
+// LIST RUN QUESTIONS (admin)
+// L'admin voit correct_answer et score directement
+// depuis run_questions (pas la vue filtrée).
+// =====================================================
+
+async function listRunQuestions(params: any, res: Response) {
+  const { run_id } = params
+
+  if (!run_id || !isValidUUID(run_id)) {
+    return res.status(400).json({ error: 'run_id invalide' })
+  }
+
+  try {
+    const { data: questions, error } = await supabase
+      .from('run_questions')
+      .select('id, run_id, question_text, correct_answer, score, created_at')
+      .eq('run_id', run_id)
+      .order('created_at', { ascending: true })
+
+    if (error) throw error
+
+    return res.json({ success: true, questions: questions || [] })
+
+  } catch (error: any) {
+    console.error('ERROR listRunQuestions:', error)
+    return res.status(500).json({ error: 'Erreur liste questions', details: error.message })
+  }
+}
+
+// =====================================================
+// GET STATISTICS
+// =====================================================
+
+async function getStatistics(params: any, res: Response) {
+  const { run_id } = params
+
+  if (!run_id || !isValidUUID(run_id)) {
+    return res.status(400).json({ error: 'run_id invalide' })
+  }
+
+  try {
+    const { data: run, error: runError } = await supabase
+      .from('game_runs')
+      .select('*')
+      .eq('id', run_id)
+      .maybeSingle()
+
+    if (runError) throw runError
+    if (!run) return res.status(404).json({ error: 'Run introuvable' })
+
+    const [
+      { count: questionsCount },
+      { count: answersCount },
+      { count: playersCount }
+    ] = await Promise.all([
+      supabase.from('run_questions').select('*', { count: 'exact', head: true }).eq('run_id', run_id),
+      supabase.from('user_run_answers').select('*', { count: 'exact', head: true }).eq('run_id', run_id),
+      supabase.from('party_players').select('*', { count: 'exact', head: true }).eq('party_id', run.party_id)
+    ])
+
+    return res.json({
+      success: true,
+      statistics: {
+        id:              run.id,
+        title:           run.title,
+        is_visible:      run.is_visible,
+        is_closed:       run.is_closed,
+        is_started:      run.is_started,
+        reveal_answers:  run.reveal_answers,
+        total_questions: questionsCount || 0,
+        total_answers:   answersCount   || 0,
+        total_players:   playersCount   || 0
+      }
+    })
+
+  } catch (error: any) {
+    console.error('ERROR getStatistics:', error)
+    return res.status(500).json({ error: 'Erreur stats', details: error.message })
   }
 }
 
@@ -529,7 +631,6 @@ async function getPartyPlayers(params: any, res: Response) {
       .select(`
         user_id,
         score,
-        joined_at,
         profiles:user_id (nom, prenom, avatar_url)
       `)
       .eq('party_id', party_id)
@@ -538,12 +639,11 @@ async function getPartyPlayers(params: any, res: Response) {
     if (error) throw error
 
     const formatted = (players || []).map((p: any, index: number) => ({
-      rank: index + 1,
-      user_id: p.user_id,
-      score: p.score,
-      joined_at: p.joined_at,
-      nom: p.profiles?.nom || 'Joueur',
-      prenom: p.profiles?.prenom || '',
+      rank:       index + 1,
+      user_id:    p.user_id,
+      score:      p.score,
+      nom:        p.profiles?.nom    || 'Joueur',
+      prenom:     p.profiles?.prenom || '',
       avatar_url: p.profiles?.avatar_url ?? null
     }))
 
@@ -556,94 +656,74 @@ async function getPartyPlayers(params: any, res: Response) {
 }
 
 // =====================================================
-// DELETE QUESTION
+// DELETE SESSION
 // =====================================================
 
-async function deleteQuestion(params: any, res: Response) {
-  const { question_id } = params
+async function deleteSession(params: any, res: Response) {
+  const { session_id } = params
 
-  if (!question_id || !isValidUUID(question_id)) {
-    return res.status(400).json({ error: 'question_id invalide' })
+  if (!session_id || !isValidUUID(session_id)) {
+    return res.status(400).json({ error: 'session_id invalide' })
   }
 
   try {
-    // Le trigger BDD bloquera la suppression si le run est déjà démarré
     const { error } = await supabase
-      .from('run_questions')
+      .from('game_sessions')
       .delete()
-      .eq('id', question_id)
+      .eq('id', session_id)
 
-    if (error) {
-      if (error.message.includes('started')) {
-        return res.status(403).json({ error: 'Impossible de supprimer : le run a déjà démarré' })
-      }
-      throw error
-    }
+    if (error) throw error
 
-    return res.json({ success: true, message: 'Question supprimée' })
+    return res.json({ success: true, message: 'Session supprimée' })
 
   } catch (error: any) {
-    console.error('ERROR deleteQuestion:', error)
-    return res.status(500).json({ error: 'Erreur suppression question', details: error.message })
+    console.error('ERROR deleteSession:', error)
+    return res.status(500).json({ error: 'Erreur suppression session', details: error.message })
   }
 }
 
 // =====================================================
-// UPDATE RUN
-// Champs modifiables : title
-// Les états (is_visible, is_closed) passent par setVisibility/closeRun
+// DELETE PARTY
 // =====================================================
 
-async function updateRun(params: any, res: Response) {
-  const { run_id, title } = params
+async function deleteParty(params: any, res: Response) {
+  const { party_id } = params
 
-  if (!run_id || !isValidUUID(run_id)) {
-    return res.status(400).json({ error: 'run_id invalide' })
-  }
-
-  if (title === undefined) {
-    return res.status(400).json({ error: 'Aucun champ à mettre à jour fourni (title)' })
-  }
-
-  if (!title || title.trim() === '') {
-    return res.status(400).json({ error: 'title ne peut pas être vide' })
+  if (!party_id || !isValidUUID(party_id)) {
+    return res.status(400).json({ error: 'party_id invalide' })
   }
 
   try {
-    const { data: run } = await supabase
-      .from('game_runs')
-      .select('id, is_started')
-      .eq('id', run_id)
+    const { data: party } = await supabase
+      .from('game_parties')
+      .select('is_initial')
+      .eq('id', party_id)
       .maybeSingle()
 
-    if (!run) return res.status(404).json({ error: 'Run non trouvé' })
+    if (!party) return res.status(404).json({ error: 'Party non trouvée' })
 
-    if (run.is_started) {
-      return res.status(403).json({
-        error: 'Impossible de modifier un run déjà démarré'
-      })
+    if (party.is_initial) {
+      return res.status(403).json({ error: 'La party initiale ne peut pas être supprimée' })
     }
 
-    const { data, error } = await supabase
-      .from('game_runs')
-      .update({ title: title.trim() })
-      .eq('id', run_id)
-      .select()
-      .single()
+    const { error } = await supabase
+      .from('game_parties')
+      .delete()
+      .eq('id', party_id)
 
     if (error) throw error
 
-    console.log(`✅ Run mis à jour: ${run_id}`)
-    return res.json({ success: true, run: data, message: 'Run mis à jour' })
+    return res.json({ success: true, message: 'Party supprimée' })
 
   } catch (error: any) {
-    console.error('ERROR updateRun:', error)
-    return res.status(500).json({ error: 'Erreur mise à jour run', details: error.message })
+    console.error('ERROR deleteParty:', error)
+    return res.status(500).json({ error: 'Erreur suppression party', details: error.message })
   }
 }
 
 // =====================================================
 // DELETE RUN
+// Bloqué si le run est déjà démarré
 // =====================================================
 
 async function deleteRun(params: any, res: Response) {
@@ -654,10 +734,9 @@ async function deleteRun(params: any, res: Response) {
   }
 
   try {
-    // Vérifier que le run n'est pas démarré avant de supprimer
     const { data: run } = await supabase
       .from('game_runs')
-      .select('is_started, is_closed')
+      .select('is_started')
       .eq('id', run_id)
       .maybeSingle()
 
@@ -681,238 +760,34 @@ async function deleteRun(params: any, res: Response) {
 }
 
 // =====================================================
-// UPDATE SESSION
-// Champs modifiables : title, description, is_paid, price_cfa, section_id
+// DELETE QUESTION
+// Le trigger BDD bloque si run déjà démarré
 // =====================================================
 
-async function updateSession(params: any, res: Response) {
-  const { session_id, title, description, is_paid, price_cfa, section_id } = params
+async function deleteQuestion(params: any, res: Response) {
+  const { question_id } = params
 
-  if (!session_id || !isValidUUID(session_id)) {
-    return res.status(400).json({ error: 'session_id invalide' })
-  }
-
-  if (
-    title === undefined &&
-    description === undefined &&
-    is_paid === undefined &&
-    price_cfa === undefined &&
-    section_id === undefined
-  ) {
-    return res.status(400).json({ error: 'Aucun champ à mettre à jour fourni' })
-  }
-
-  if (section_id && !isValidUUID(section_id)) {
-    return res.status(400).json({ error: 'section_id invalide' })
+  if (!question_id || !isValidUUID(question_id)) {
+    return res.status(400).json({ error: 'question_id invalide' })
   }
 
   try {
-    const { data: current } = await supabase
-      .from('game_sessions')
-      .select('is_paid, price_cfa, game_id')
-      .eq('id', session_id)
-      .maybeSingle()
+    const { error } = await supabase
+      .from('run_questions')
+      .delete()
+      .eq('id', question_id)
 
-    if (!current) return res.status(404).json({ error: 'Session non trouvée' })
-
-    const effectiveIsPaid = is_paid  !== undefined ? is_paid  : current.is_paid
-    const effectivePrice  = price_cfa !== undefined ? price_cfa : current.price_cfa
-
-    if (effectiveIsPaid && effectivePrice <= 0) {
-      return res.status(400).json({ error: 'price_cfa doit être > 0 pour une session payante' })
-    }
-    if (!effectiveIsPaid && effectivePrice > 0) {
-      return res.status(400).json({ error: 'price_cfa doit être 0 pour une session gratuite' })
-    }
-
-    if (section_id) {
-      const { data: section } = await supabase
-        .from('game_sections')
-        .select('id')
-        .eq('id', section_id)
-        .eq('game_id', current.game_id)
-        .maybeSingle()
-
-      if (!section) return res.status(404).json({ error: 'Section non trouvée pour ce jeu' })
-    }
-
-    const updates: Record<string, any> = {}
-    if (title       !== undefined) updates.title       = title
-    if (description !== undefined) updates.description = description || null
-    if (is_paid     !== undefined) updates.is_paid     = !!is_paid
-    if (price_cfa   !== undefined) updates.price_cfa   = effectiveIsPaid ? price_cfa : 0
-    if (section_id  !== undefined) updates.section_id  = section_id || null
-
-    const { data, error } = await supabase
-      .from('game_sessions')
-      .update(updates)
-      .eq('id', session_id)
-      .select()
-      .single()
-
-    if (error) throw error
-
-    console.log(`✅ Session mise à jour: ${session_id}`)
-    return res.json({ success: true, session: data, message: 'Session mise à jour' })
-
-  } catch (error: any) {
-    console.error('ERROR updateSession:', error)
-    return res.status(500).json({ error: 'Erreur mise à jour session', details: error.message })
-  }
-}
-
-// =====================================================
-// DELETE SESSION
-// Bloqué si des runs ont déjà démarré dans cette session
-// =====================================================
-
-async function deleteSession(params: any, res: Response) {
-  const { session_id } = params
-
-  if (!session_id || !isValidUUID(session_id)) {
-    return res.status(400).json({ error: 'session_id invalide' })
-  }
-
-  try {
-    // Récupérer toutes les parties de cette session
-    const { data: parties } = await supabase
-      .from('game_parties')
-      .select('id')
-      .eq('session_id', session_id)
-
-    const partyIds = (parties || []).map((p: any) => p.id)
-
-    if (partyIds.length > 0) {
-      const { data: startedRuns } = await supabase
-        .from('game_runs')
-        .select('id')
-        .in('party_id', partyIds)
-        .eq('is_started', true)
-        .limit(1)
-
-      if (startedRuns && startedRuns.length > 0) {
-        return res.status(403).json({
-          error: 'Impossible de supprimer : un ou plusieurs runs ont déjà démarré dans cette session'
-        })
+    if (error) {
+      if (error.message.includes('started')) {
+        return res.status(403).json({ error: 'Impossible de supprimer : le run a déjà démarré' })
       }
+      throw error
     }
 
-    const { error } = await supabase
-      .from('game_sessions')
-      .delete()
-      .eq('id', session_id)
-
-    if (error) throw error
-
-    console.log(`✅ Session supprimée: ${session_id}`)
-    return res.json({ success: true, message: 'Session supprimée (parties et runs liés supprimés en cascade)' })
+    return res.json({ success: true, message: 'Question supprimée' })
 
   } catch (error: any) {
-    console.error('ERROR deleteSession:', error)
-    return res.status(500).json({ error: 'Erreur suppression session', details: error.message })
-  }
-}
-
-// =====================================================
-// UPDATE PARTY
-// Champs modifiables : title, min_score, min_rank
-// =====================================================
-
-async function updateParty(params: any, res: Response) {
-  const { party_id, title, min_score, min_rank } = params
-
-  if (!party_id || !isValidUUID(party_id)) {
-    return res.status(400).json({ error: 'party_id invalide' })
-  }
-
-  if (title === undefined && min_score === undefined && min_rank === undefined) {
-    return res.status(400).json({ error: 'Aucun champ à mettre à jour fourni' })
-  }
-
-  try {
-    const { data: current } = await supabase
-      .from('game_parties')
-      .select('id, is_initial')
-      .eq('id', party_id)
-      .maybeSingle()
-
-    if (!current) return res.status(404).json({ error: 'Party non trouvée' })
-
-    const updates: Record<string, any> = {}
-    if (title     !== undefined) updates.title     = title
-    if (min_score !== undefined) updates.min_score = min_score ?? 0
-    if (min_rank  !== undefined) updates.min_rank  = min_rank  ?? null
-
-    const { data, error } = await supabase
-      .from('game_parties')
-      .update(updates)
-      .eq('id', party_id)
-      .select()
-      .single()
-
-    if (error) throw error
-
-    console.log(`✅ Party mise à jour: ${party_id}`)
-    return res.json({ success: true, party: data, message: 'Party mise à jour' })
-
-  } catch (error: any) {
-    console.error('ERROR updateParty:', error)
-    return res.status(500).json({ error: 'Erreur mise à jour party', details: error.message })
-  }
-}
-
-// =====================================================
-// DELETE PARTY
-// Bloqué si la party est initiale OU si un run a démarré
-// =====================================================
-
-async function deleteParty(params: any, res: Response) {
-  const { party_id } = params
-
-  if (!party_id || !isValidUUID(party_id)) {
-    return res.status(400).json({ error: 'party_id invalide' })
-  }
-
-  try {
-    const { data: party } = await supabase
-      .from('game_parties')
-      .select('id, is_initial')
-      .eq('id', party_id)
-      .maybeSingle()
-
-    if (!party) return res.status(404).json({ error: 'Party non trouvée' })
-
-    if (party.is_initial) {
-      return res.status(403).json({
-        error: "Impossible de supprimer la party initiale d'une session. Supprimez la session directement."
-      })
-    }
-
-    const { data: startedRuns } = await supabase
-      .from('game_runs')
-      .select('id')
-      .eq('party_id', party_id)
-      .eq('is_started', true)
-      .limit(1)
-
-    if (startedRuns && startedRuns.length > 0) {
-      return res.status(403).json({
-        error: 'Impossible de supprimer : un ou plusieurs runs ont déjà démarré dans cette party'
-      })
-    }
-
-    const { error } = await supabase
-      .from('game_parties')
-      .delete()
-      .eq('id', party_id)
-
-    if (error) throw error
-
-    console.log(`✅ Party supprimée: ${party_id}`)
-    return res.json({ success: true, message: 'Party supprimée (runs liés supprimés en cascade)' })
-
-  } catch (error: any) {
-    console.error('ERROR deleteParty:', error)
-    return res.status(500).json({ error: 'Erreur suppression party', details: error.message })
+    console.error('ERROR deleteQuestion:', error)
+    return res.status(500).json({ error: 'Erreur suppression question', details: error.message })
   }
 }
