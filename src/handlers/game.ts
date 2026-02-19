@@ -50,7 +50,7 @@ export async function handleGame(req: Request, res: Response) {
 // Filtre les parties existantes pour cette session.
 // =====================================================
 
-async function listPartiesForSession(userId: string, params: any, res: Response) {
+async function listPartiesForSession(_userId: string, params: any, res: Response) {
   const { session_id } = params
 
   if (!session_id || !isValidUUID(session_id)) {
