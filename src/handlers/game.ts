@@ -34,6 +34,7 @@ export async function handleGame(req: Request, res: Response) {
       case 'getQuestions':           return await getQuestions(user_id, params, res)
       case 'submitAnswer':           return await submitAnswer(user_id, params, res)
       case 'getLeaderboard':         return await getLeaderboard(user_id, params, res)
+      case 'getPartyHistory':        return await getPartyHistory(user_id, params, res)
       default:
         return res.status(400).json({ error: `Action inconnue: ${functionName}` })
     }
@@ -553,5 +554,103 @@ async function getLeaderboard(userId: string, params: any, res: Response) {
   } catch (error: any) {
     console.error('ERROR getLeaderboard:', error)
     return res.status(500).json({ error: 'Erreur classement', details: error.message })
+  }
+}
+
+// =====================================================
+// GET PARTY HISTORY
+// Retourne toutes les questions fermées (reveal_answers=true)
+// de la party, avec la réponse de l'utilisateur et le score total
+// =====================================================
+
+async function getPartyHistory(userId: string, params: any, res: Response) {
+  const { party_id } = params
+
+  if (!party_id || !isValidUUID(party_id)) {
+    return res.status(400).json({ error: 'party_id invalide' })
+  }
+
+  try {
+    // Score total de l'utilisateur dans cette party
+    const { data: playerData } = await supabase
+      .from('party_players')
+      .select('score')
+      .eq('party_id', party_id)
+      .eq('user_id', userId)
+      .maybeSingle()
+
+    const totalScore = playerData?.score ?? null // null = pas encore inscrit
+
+    // Tous les runs fermés de cette party
+    const { data: runs, error: runsError } = await supabase
+      .from('game_runs')
+      .select('id, title, is_closed, reveal_answers')
+      .eq('party_id', party_id)
+      .eq('is_closed', true)
+      .eq('reveal_answers', true)
+      .order('created_at', { ascending: true })
+
+    if (runsError) throw runsError
+    if (!runs || runs.length === 0) {
+      return res.json({ success: true, history: [], total_score: totalScore, is_member: totalScore !== null })
+    }
+
+    const runIds = runs.map((r: any) => r.id)
+
+    // Toutes les questions de ces runs (correct_answer révélé car reveal_answers=true)
+    const { data: questions, error: qError } = await supabase
+      .from('view_run_questions')
+      .select('id, run_id, question_text, correct_answer, score')
+      .in('run_id', runIds)
+
+    if (qError) throw qError
+
+    // Réponses de l'utilisateur
+    const { data: answers, error: aError } = await supabase
+      .from('user_run_answers')
+      .select('run_question_id, answer, score_awarded')
+      .in('run_id', runIds)
+      .eq('user_id', userId)
+
+    if (aError) throw aError
+
+    const answerMap = new Map<string, { answer: boolean; score_awarded: number }>(
+      (answers || []).map((a: any) => [a.run_question_id, { answer: a.answer, score_awarded: a.score_awarded }])
+    )
+
+    // Grouper questions par run
+    const runMap = new Map((runs || []).map((r: any) => [r.id, { ...r, questions: [] as any[] }]))
+
+    for (const q of questions || []) {
+      const myAnswer = answerMap.get(q.id)
+      const entry = {
+        id:            q.id,
+        question_text: q.question_text,
+        correct_answer: q.correct_answer,
+        score:         q.score,
+        my_answer:     myAnswer?.answer ?? null,
+        score_awarded: myAnswer?.score_awarded ?? null,
+        answered:      !!myAnswer,
+      }
+      const run = runMap.get(q.run_id)
+      if (run) run.questions.push(entry)
+    }
+
+    const history = Array.from(runMap.values()).map(r => ({
+      run_id:    r.id,
+      run_title: r.title,
+      questions: r.questions,
+    }))
+
+    return res.json({
+      success:     true,
+      history,
+      total_score: totalScore,
+      is_member:   totalScore !== null,
+    })
+
+  } catch (error: any) {
+    console.error('ERROR getPartyHistory:', error)
+    return res.status(500).json({ error: 'Erreur historique', details: error.message })
   }
 }
