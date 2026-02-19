@@ -27,12 +27,13 @@ export async function handleGame(req: Request, res: Response) {
 
   try {
     switch (functionName) {
-      case 'listSessions':    return await listSessions(params, res)
-      case 'joinSession':     return await joinSession(user_id, params, res)
-      case 'listVisibleRuns': return await listVisibleRuns(user_id, params, res)
-      case 'getQuestions':    return await getQuestions(user_id, params, res)
-      case 'submitAnswer':    return await submitAnswer(user_id, params, res)
-      case 'getLeaderboard':  return await getLeaderboard(user_id, params, res)
+      case 'listSessions':           return await listSessions(params, res)
+      case 'listPartiesForSession':  return await listPartiesForSession(user_id, params, res)
+      case 'joinSession':            return await joinSession(user_id, params, res)
+      case 'listVisibleRuns':        return await listVisibleRuns(user_id, params, res)
+      case 'getQuestions':           return await getQuestions(user_id, params, res)
+      case 'submitAnswer':           return await submitAnswer(user_id, params, res)
+      case 'getLeaderboard':         return await getLeaderboard(user_id, params, res)
       default:
         return res.status(400).json({ error: `Action inconnue: ${functionName}` })
     }
@@ -43,8 +44,49 @@ export async function handleGame(req: Request, res: Response) {
 }
 
 // =====================================================
-// LIST SESSIONS
+// LIST PARTIES FOR SESSION
+// Appelé par le joueur pour choisir son groupe.
+// Ne retourne que les infos non-sensibles (pas de correct_answer).
+// Filtre les parties existantes pour cette session.
 // =====================================================
+
+async function listPartiesForSession(userId: string, params: any, res: Response) {
+  const { session_id } = params
+
+  if (!session_id || !isValidUUID(session_id)) {
+    return res.status(400).json({ error: 'session_id invalide' })
+  }
+
+  try {
+    // Vérifier que la session existe
+    const { data: session, error: sessionError } = await supabase
+      .from('game_sessions')
+      .select('id, title')
+      .eq('id', session_id)
+      .maybeSingle()
+
+    if (sessionError || !session) {
+      return res.status(404).json({ error: 'Session non trouvée' })
+    }
+
+    const { data: parties, error } = await supabase
+      .from('game_parties')
+      .select('id, title, is_initial, min_score, min_rank')
+      .eq('session_id', session_id)
+      .order('is_initial', { ascending: false }) // party initiale en premier
+      .order('created_at', { ascending: true })
+
+    if (error) throw error
+
+    return res.json({ success: true, parties: parties || [] })
+
+  } catch (error: any) {
+    console.error('ERROR listPartiesForSession:', error)
+    return res.status(500).json({ error: 'Erreur liste groupes', details: error.message })
+  }
+}
+
+
 
 async function listSessions(params: any, res: Response) {
   const { game_key } = params
