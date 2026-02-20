@@ -45,3 +45,8 @@ export function getClientForUser(accessToken: string): SupabaseClient {
 if (process.env.NODE_ENV === 'development') {
   console.log('✅ Supabase initialisé — SERVICE_ROLE (autres fichiers) + ANON+JWT (game.ts)')
 }
+
+// Export default = supabaseAdmin pour compatibilité avec les fichiers existants
+// qui font : import supabase from '../config/supabase'
+export default supabaseAdmin
+  
