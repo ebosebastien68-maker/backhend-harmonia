@@ -579,30 +579,99 @@ async function getQuestions(userId: string, params: any, res: Response) {
 // Note : auth.uid() géré côté frontend (Supabase Auth).
 // =====================================================
 
-async function submitAnswer(_userId: string, params: any, res: Response) {
+async function submitAnswer(userId: string, params: any, res: Response) {
   const { run_question_id, answer } = params
 
-  if (!run_question_id || typeof answer !== 'boolean') {
-    return res.status(400).json({ error: 'run_question_id et answer (boolean) requis' })
+  if (!run_question_id || !isValidUUID(run_question_id)) {
+    return res.status(400).json({ error: 'run_question_id invalide' })
+  }
+  if (typeof answer !== 'boolean') {
+    return res.status(400).json({ error: 'answer doit être un boolean' })
   }
 
   try {
-    const { error } = await supabase.rpc('submit_answer', {
+    // Vérifier que la question existe et récupérer run_id
+    const { data: rq, error: rqErr } = await supabase
+      .from('run_questions')
+      .select('id, run_id')
+      .eq('id', run_question_id)
+      .maybeSingle()
+
+    if (rqErr) throw rqErr
+    if (!rq) return res.status(404).json({ error: 'Question non trouvée' })
+
+    // Vérifier que le run est ouvert
+    const { data: run, error: runErr } = await supabase
+      .from('game_runs')
+      .select('id, party_id, is_closed, is_visible')
+      .eq('id', rq.run_id)
+      .maybeSingle()
+
+    if (runErr) throw runErr
+    if (!run) return res.status(404).json({ error: 'Run non trouvé' })
+    if (run.is_closed) return res.status(403).json({ error: 'Run fermé — plus de réponses acceptées' })
+    if (!run.is_visible) return res.status(403).json({ error: 'Run non visible' })
+
+    // Vérifier que l'utilisateur est bien inscrit dans la party
+    const { data: player } = await supabase
+      .from('party_players')
+      .select('id, score')
+      .eq('party_id', run.party_id)
+      .eq('user_id', userId)
+      .maybeSingle()
+
+    if (!player) return res.status(403).json({ error: "Rejoignez d'abord la session" })
+
+    // Vérifier si déjà répondu
+    const { data: existing } = await supabase
+      .from('user_run_answers')
+      .select('id')
+      .eq('run_question_id', run_question_id)
+      .eq('user_id', userId)
+      .maybeSingle()
+
+    if (existing) return res.status(400).json({ error: 'Déjà répondu à cette question' })
+
+    // Essayer le RPC d'abord (avec user_id explicite si supporté)
+    const { error: rpcError } = await supabase.rpc('submit_answer', {
       p_run_question_id: run_question_id,
+      p_user_id: userId,
       p_answer: answer
     })
 
-    if (error) {
-      if (error.message.includes('already answered')) {
-        return res.status(400).json({ error: 'Déjà répondu à cette question' })
+    if (rpcError) {
+      // Si le RPC ne supporte pas p_user_id, insérer directement
+      const { data: qData } = await supabase
+        .from('run_questions')
+        .select('correct_answer, score')
+        .eq('id', run_question_id)
+        .maybeSingle()
+
+      const scoreAwarded = qData?.correct_answer === answer ? (qData?.score ?? 0) : 0
+
+      const { error: insertErr } = await supabase
+        .from('user_run_answers')
+        .insert({
+          run_id: rq.run_id,
+          run_question_id,
+          user_id: userId,
+          answer,
+          score_awarded: scoreAwarded,
+        })
+
+      if (insertErr) {
+        if (insertErr.message.includes('duplicate') || insertErr.code === '23505') {
+          return res.status(400).json({ error: 'Déjà répondu à cette question' })
+        }
+        throw insertErr
       }
-      if (error.message.includes('closed')) {
-        return res.status(403).json({ error: 'Run fermé — plus de réponses acceptées' })
-      }
-      if (error.message.includes('not participant')) {
-        return res.status(403).json({ error: "Vous n'êtes pas participant de cette party" })
-      }
-      throw error
+
+      // Mettre à jour le score cumulé dans party_players
+      await supabase
+        .from('party_players')
+        .update({ score: (player.score ?? 0) + scoreAwarded })
+        .eq('party_id', run.party_id)
+        .eq('user_id', userId)
     }
 
     return res.json({ success: true, message: 'Réponse enregistrée' })
