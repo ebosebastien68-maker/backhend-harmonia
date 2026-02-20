@@ -310,6 +310,7 @@ async function joinSession(userId: string, params: any, res: Response) {
 // =====================================================
 
 async function listPartiesForSession(userId: string, params: any, res: Response) {
+  void userId; // non utilisé — requis pour cohérence du switch
   const { session_id } = params
   if (!session_id || !isValidUUID(session_id))
     return res.status(400).json({ error: 'session_id invalide' })
