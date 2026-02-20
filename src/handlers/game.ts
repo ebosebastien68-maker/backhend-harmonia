@@ -57,79 +57,107 @@ export async function handleGame(req: Request, res: Response) {
 async function listMySessions(userId: string, params: any, res: Response) {
   const { game_key } = params
   try {
-    // Trouver les sessions via party_players → game_parties → game_sessions
-    const { data: myParties, error } = await supabase
+    // Étape 1 : party_ids où l'utilisateur est inscrit
+    const { data: myParties, error: e1 } = await supabase
       .from('party_players')
-      .select(`
-        party_id,
-        score,
-        game_parties!inner (
-          session_id,
-          game_sessions!inner (
-            id, title, description, is_paid, price_cfa, game_key
-          )
-        )
-      `)
+      .select('party_id, score')
       .eq('user_id', userId)
 
-    if (error) throw error
-
-    // Dédupliquer par session_id
-    const sessionMap = new Map<string, any>()
-    for (const row of myParties || []) {
-      const sess = (row as any).game_parties?.game_sessions
-      if (!sess) continue
-      if (game_key && sess.game_key !== game_key) continue
-      if (!sessionMap.has(sess.id)) {
-        sessionMap.set(sess.id, {
-          id: sess.id,
-          title: sess.title,
-          description: sess.description,
-          is_paid: sess.is_paid,
-          price_cfa: sess.price_cfa,
-          my_score: (row as any).score ?? 0,
-        })
-      }
+    if (e1) throw e1
+    if (!myParties || myParties.length === 0) {
+      return res.json({ success: true, sessions: [] })
     }
 
-    return res.json({ success: true, sessions: Array.from(sessionMap.values()) })
+    const partyIds = myParties.map((p: any) => p.party_id)
+
+    // Étape 2 : session_id depuis game_parties
+    const { data: partiesData, error: e2 } = await supabase
+      .from('game_parties')
+      .select('id, session_id')
+      .in('id', partyIds)
+
+    if (e2) throw e2
+
+    const sessionIds = [...new Set((partiesData || []).map((p: any) => p.session_id).filter(Boolean))]
+    if (sessionIds.length === 0) return res.json({ success: true, sessions: [] })
+
+    // Étape 3 : sessions avec filtre game_key si fourni
+    let sessQuery = supabase
+      .from('game_sessions')
+      .select('id, title, description, is_paid, price_cfa, game_id')
+      .in('id', sessionIds)
+
+    const { data: sessions, error: e3 } = await sessQuery
+    if (e3) throw e3
+
+    // Filtre game_key via games table si besoin
+    let filteredSessions = sessions || []
+    if (game_key) {
+      const { data: game } = await supabase.from('games').select('id').eq('key_name', game_key).maybeSingle()
+      if (game) filteredSessions = filteredSessions.filter((s: any) => s.game_id === game.id)
+    }
+
+    // Construire scoreMap : session_id → score max de l'utilisateur dans cette session
+    const scoreMap = new Map<string, number>()
+    for (const mp of myParties) {
+      const party = (partiesData || []).find((p: any) => p.id === mp.party_id)
+      if (!party) continue
+      const cur = scoreMap.get(party.session_id) ?? 0
+      scoreMap.set(party.session_id, Math.max(cur, mp.score ?? 0))
+    }
+
+    const result = filteredSessions.map((s: any) => ({
+      id: s.id,
+      title: s.title,
+      description: s.description,
+      is_paid: s.is_paid,
+      price_cfa: s.price_cfa,
+      my_score: scoreMap.get(s.id) ?? 0,
+    }))
+
+    return res.json({ success: true, sessions: result })
   } catch (error: any) {
     console.error('ERROR listMySessions:', error)
     return res.status(500).json({ error: 'Erreur mes sessions', details: error.message })
   }
 }
 
-// =====================================================
-// LIST AVAILABLE SESSIONS
-// Sessions disponibles auxquelles l'utilisateur n'est PAS encore inscrit
-// =====================================================
-
 async function listAvailableSessions(userId: string, params: any, res: Response) {
   const { game_key } = params
   try {
-    // 1. Sessions auxquelles l'utilisateur participe déjà
+    // 1. Sessions déjà rejointes
     const { data: myParties } = await supabase
       .from('party_players')
       .select('game_parties!inner(session_id)')
       .eq('user_id', userId)
 
-    const mySessionIds = new Set<string>(
-      (myParties || []).map((p: any) => p.game_parties?.session_id).filter(Boolean)
-    )
+    // Extraire session_ids déjà rejointes (jointure simple)
+    const mySessionIds = new Set<string>()
+    for (const mp of myParties || []) {
+      const sid = (mp as any).game_parties?.session_id
+      if (sid) mySessionIds.add(sid)
+    }
 
-    // 2. Toutes les sessions du jeu
-    const query = supabase
+    // 2. Résoudre game_id si game_key fourni
+    let gameId: string | null = null
+    if (game_key) {
+      const { data: game } = await supabase.from('games').select('id').eq('key_name', game_key).maybeSingle()
+      gameId = game?.id ?? null
+    }
+
+    // 3. Toutes les sessions du jeu
+    let query = supabase
       .from('game_sessions')
       .select('id, title, description, is_paid, price_cfa')
       .order('created_at', { ascending: false })
 
-    if (game_key) query.eq('game_key', game_key as any)
+    if (gameId) query = query.eq('game_id', gameId) as any
 
     const { data: allSessions, error } = await query
     if (error) throw error
 
-    // 3. Filtrer celles déjà rejointes
-    const available = (allSessions || []).filter(s => !mySessionIds.has(s.id))
+    // 4. Exclure celles déjà rejointes
+    const available = (allSessions || []).filter((s: any) => !mySessionIds.has(s.id))
     return res.json({ success: true, sessions: available })
   } catch (error: any) {
     console.error('ERROR listAvailableSessions:', error)
