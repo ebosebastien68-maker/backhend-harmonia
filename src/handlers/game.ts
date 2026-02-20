@@ -1,9 +1,23 @@
 // =====================================================
-// HANDLER GAME - VERSION SÉCURISÉE
-// Changements vs version précédente :
-//   + listVisibleRuns       → polling frontend (runs is_visible=true)
-//   + getQuestions          → lit view_run_questions (correct_answer masqué si run non fermé)
-//   + getQuestions          → fonctionne aussi après fermeture (reveal_answers=true via trigger)
+// HANDLER GAME — SÉCURISÉ — CLÉ ANON UNIQUEMENT
+//
+// COMMENT FONCTIONNE LA SÉCURITÉ :
+// ──────────────────────────────────────────────────
+// 1. Le backend utilise la clé ANON → RLS Supabase actif
+// 2. La vue view_run_questions masque correct_answer
+//    tant que reveal_answers = false sur le run
+// 3. submitAnswer lit correct_answer en interne pour
+//    calculer le score, mais ne le retourne JAMAIS au client
+// 4. getMyAnswers (onglet 3) → ma réponse uniquement, 0 score
+// 5. getMyResults (onglet 4) → score + bonne réponse
+//    UNIQUEMENT si reveal_answers = true (admin a fermé le run)
+//
+// 4 ONGLETS :
+//   1. listMySessions         → sessions rejointes + mon score global
+//   2. listAvailableSessions  → sessions disponibles (pas encore rejoint)
+//   3. getMyAnswers           → mes réponses envoyées (PAS de score ni bonne réponse)
+//   4. getMyResults           → résultats révélés par l'admin UNIQUEMENT
+//
 // =====================================================
 
 import { Request, Response } from 'express'
@@ -13,91 +27,68 @@ const isValidUUID = (id: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
 
 export async function handleGame(req: Request, res: Response) {
-  const { function: functionName, user_id, ...params } = req.body
+  const { function: fn, user_id, ...params } = req.body
 
-  console.log(`[${new Date().toISOString()}] 🎮 Game: ${functionName} | User: ${user_id || 'Public'}`)
+  console.log(`[${new Date().toISOString()}] Game: ${fn} | user: ${user_id ?? '?'}`)
 
-  if (functionName !== 'listSessions' && !user_id) {
-    return res.status(401).json({ error: 'user_id requis' })
-  }
-
-  if (user_id && !isValidUUID(user_id)) {
-    return res.status(400).json({ error: 'user_id invalide' })
-  }
+  if (!user_id)              return res.status(401).json({ error: 'user_id requis' })
+  if (!isValidUUID(user_id)) return res.status(400).json({ error: 'user_id invalide' })
 
   try {
-    switch (functionName) {
-      case 'listSessions':           return await listSessions(params, res)
-      case 'listMySessions':          return await listMySessions(user_id, params, res)
-      case 'listAvailableSessions':   return await listAvailableSessions(user_id, params, res)
-      case 'listPartiesForSession':  return await listPartiesForSession(user_id, params, res)
+    switch (fn) {
+      case 'listMySessions':         return await listMySessions(user_id, params, res)
+      case 'listAvailableSessions':  return await listAvailableSessions(user_id, params, res)
       case 'joinSession':            return await joinSession(user_id, params, res)
-      case 'listVisibleRuns':        return await listVisibleRuns(user_id, params, res)
-      case 'getQuestions':           return await getQuestions(user_id, params, res)
+      case 'listPartiesForSession':  return await listPartiesForSession(user_id, params, res)
+      case 'getUnansweredQuestions': return await getUnansweredQuestions(user_id, params, res)
       case 'submitAnswer':           return await submitAnswer(user_id, params, res)
-      case 'getLeaderboard':         return await getLeaderboard(user_id, params, res)
-      case 'getPartyHistory':        return await getPartyHistory(user_id, params, res)
-      case 'getUnansweredQuestions':  return await getUnansweredQuestions(user_id, params, res)
+      case 'getMyAnswers':           return await getMyAnswers(user_id, params, res)
+      case 'getMyResults':           return await getMyResults(user_id, params, res)
       default:
-        return res.status(400).json({ error: `Action inconnue: ${functionName}` })
+        return res.status(400).json({ error: `Action inconnue: ${fn}` })
     }
-  } catch (error: any) {
-    console.error(`💥 CRASH GAME:`, error)
-    return res.status(500).json({ error: 'Erreur serveur', details: error.message })
+  } catch (err: any) {
+    console.error('CRASH GAME:', err)
+    return res.status(500).json({ error: 'Erreur serveur', details: err.message })
   }
 }
 
-
 // =====================================================
-// LIST MY SESSIONS
-// Sessions auxquelles l'utilisateur participe déjà
-// (présent dans party_players pour au moins une party)
+// ONGLET 1 — MES SESSIONS
 // =====================================================
 
 async function listMySessions(userId: string, params: any, res: Response) {
   const { game_key } = params
   try {
-    // Étape 1 : party_ids où l'utilisateur est inscrit
     const { data: myParties, error: e1 } = await supabase
-      .from('party_players')
-      .select('party_id, score')
-      .eq('user_id', userId)
-
+      .from('party_players').select('party_id, score').eq('user_id', userId)
     if (e1) throw e1
-    if (!myParties || myParties.length === 0) {
+    if (!myParties || myParties.length === 0)
       return res.json({ success: true, sessions: [] })
-    }
 
     const partyIds = myParties.map((p: any) => p.party_id)
 
-    // Étape 2 : session_id depuis game_parties
     const { data: partiesData, error: e2 } = await supabase
-      .from('game_parties')
-      .select('id, session_id')
-      .in('id', partyIds)
-
+      .from('game_parties').select('id, session_id').in('id', partyIds)
     if (e2) throw e2
 
-    const sessionIds = [...new Set((partiesData || []).map((p: any) => p.session_id).filter(Boolean))]
+    const sessionIds = [...new Set(
+      (partiesData || []).map((p: any) => p.session_id).filter(Boolean)
+    )]
     if (sessionIds.length === 0) return res.json({ success: true, sessions: [] })
 
-    // Étape 3 : sessions avec filtre game_key si fourni
-    let sessQuery = supabase
-      .from('game_sessions')
-      .select('id, title, description, is_paid, price_cfa, game_id')
+    const { data: sessions, error: e3 } = await supabase
+      .from('game_sessions').select('id, title, description, is_paid, price_cfa, game_id')
       .in('id', sessionIds)
-
-    const { data: sessions, error: e3 } = await sessQuery
     if (e3) throw e3
 
-    // Filtre game_key via games table si besoin
-    let filteredSessions = sessions || []
+    let filtered = sessions || []
     if (game_key) {
-      const { data: game } = await supabase.from('games').select('id').eq('key_name', game_key).maybeSingle()
-      if (game) filteredSessions = filteredSessions.filter((s: any) => s.game_id === game.id)
+      const { data: game } = await supabase
+        .from('games').select('id').eq('key_name', game_key).maybeSingle()
+      if (game) filtered = filtered.filter((s: any) => s.game_id === game.id)
     }
 
-    // Construire scoreMap : session_id → score max de l'utilisateur dans cette session
     const scoreMap = new Map<string, number>()
     for (const mp of myParties) {
       const party = (partiesData || []).find((p: any) => p.id === mp.party_id)
@@ -106,830 +97,411 @@ async function listMySessions(userId: string, params: any, res: Response) {
       scoreMap.set(party.session_id, Math.max(cur, mp.score ?? 0))
     }
 
-    const result = filteredSessions.map((s: any) => ({
-      id: s.id,
-      title: s.title,
-      description: s.description,
-      is_paid: s.is_paid,
-      price_cfa: s.price_cfa,
-      my_score: scoreMap.get(s.id) ?? 0,
-    }))
-
-    return res.json({ success: true, sessions: result })
-  } catch (error: any) {
-    console.error('ERROR listMySessions:', error)
-    return res.status(500).json({ error: 'Erreur mes sessions', details: error.message })
+    return res.json({
+      success: true,
+      sessions: filtered.map((s: any) => ({
+        id: s.id, title: s.title, description: s.description,
+        is_paid: s.is_paid, price_cfa: s.price_cfa,
+        my_score: scoreMap.get(s.id) ?? 0,
+      }))
+    })
+  } catch (err: any) {
+    console.error('ERROR listMySessions:', err)
+    return res.status(500).json({ error: 'Erreur mes sessions', details: err.message })
   }
 }
+
+// =====================================================
+// ONGLET 2 — EXPLORER
+// =====================================================
 
 async function listAvailableSessions(userId: string, params: any, res: Response) {
   const { game_key } = params
   try {
-    // 1. Sessions déjà rejointes
     const { data: myParties } = await supabase
-      .from('party_players')
-      .select('game_parties!inner(session_id)')
-      .eq('user_id', userId)
+      .from('party_players').select('game_parties!inner(session_id)').eq('user_id', userId)
 
-    // Extraire session_ids déjà rejointes (jointure simple)
     const mySessionIds = new Set<string>()
     for (const mp of myParties || []) {
       const sid = (mp as any).game_parties?.session_id
       if (sid) mySessionIds.add(sid)
     }
 
-    // 2. Résoudre game_id si game_key fourni
     let gameId: string | null = null
     if (game_key) {
-      const { data: game } = await supabase.from('games').select('id').eq('key_name', game_key).maybeSingle()
+      const { data: game } = await supabase
+        .from('games').select('id').eq('key_name', game_key).maybeSingle()
       gameId = game?.id ?? null
     }
 
-    // 3. Toutes les sessions du jeu
     let query = supabase
-      .from('game_sessions')
-      .select('id, title, description, is_paid, price_cfa')
+      .from('game_sessions').select('id, title, description, is_paid, price_cfa')
       .order('created_at', { ascending: false })
-
     if (gameId) query = query.eq('game_id', gameId) as any
 
     const { data: allSessions, error } = await query
     if (error) throw error
 
-    // 4. Exclure celles déjà rejointes
-    const available = (allSessions || []).filter((s: any) => !mySessionIds.has(s.id))
-    return res.json({ success: true, sessions: available })
-  } catch (error: any) {
-    console.error('ERROR listAvailableSessions:', error)
-    return res.status(500).json({ error: 'Erreur sessions disponibles', details: error.message })
-  }
-}
-
-// =====================================================
-// LIST PARTIES FOR SESSION
-// Appelé par le joueur pour choisir son groupe.
-// Ne retourne que les infos non-sensibles (pas de correct_answer).
-// Filtre les parties existantes pour cette session.
-// =====================================================
-
-async function listPartiesForSession(_userId: string, params: any, res: Response) {
-  const { session_id } = params
-
-  if (!session_id || !isValidUUID(session_id)) {
-    return res.status(400).json({ error: 'session_id invalide' })
-  }
-
-  try {
-    // Vérifier que la session existe
-    const { data: session, error: sessionError } = await supabase
-      .from('game_sessions')
-      .select('id, title')
-      .eq('id', session_id)
-      .maybeSingle()
-
-    if (sessionError || !session) {
-      return res.status(404).json({ error: 'Session non trouvée' })
-    }
-
-    const { data: parties, error } = await supabase
-      .from('game_parties')
-      .select('id, title, is_initial, min_score, min_rank')
-      .eq('session_id', session_id)
-      .order('is_initial', { ascending: false }) // party initiale en premier
-      .order('created_at', { ascending: true })
-
-    if (error) throw error
-
-    return res.json({ success: true, parties: parties || [] })
-
-  } catch (error: any) {
-    console.error('ERROR listPartiesForSession:', error)
-    return res.status(500).json({ error: 'Erreur liste groupes', details: error.message })
-  }
-}
-
-
-
-async function listSessions(params: any, res: Response) {
-  const { game_key } = params
-
-  if (!game_key) {
-    return res.status(400).json({ error: 'game_key requis' })
-  }
-
-  try {
-    const { data: game } = await supabase
-      .from('games')
-      .select('id')
-      .eq('key_name', game_key)
-      .maybeSingle()
-
-    if (!game) return res.status(404).json({ error: 'Jeu non trouvé' })
-
-    const { data: sessions, error } = await supabase
-      .from('game_sessions')
-      .select('id, title, description, is_paid, price_cfa, created_at')
-      .eq('game_id', game.id)
-      .order('created_at', { ascending: false })
-
-    if (error) throw error
-
-    return res.json({ success: true, sessions: sessions || [] })
-
-  } catch (error: any) {
-    console.error('ERROR listSessions:', error)
-    return res.status(500).json({ error: 'Erreur liste sessions', details: error.message })
+    return res.json({
+      success: true,
+      sessions: (allSessions || []).filter((s: any) => !mySessionIds.has(s.id))
+    })
+  } catch (err: any) {
+    console.error('ERROR listAvailableSessions:', err)
+    return res.status(500).json({ error: 'Erreur sessions disponibles', details: err.message })
   }
 }
 
 // =====================================================
 // JOIN SESSION
-// Anti double-débit + utilise party initiale du trigger BDD
 // =====================================================
 
 async function joinSession(userId: string, params: any, res: Response) {
   const { session_id, party_id: requestedPartyId } = params
 
-  if (!session_id || !isValidUUID(session_id)) {
+  if (!session_id || !isValidUUID(session_id))
     return res.status(400).json({ error: 'session_id invalide' })
-  }
-
-  if (requestedPartyId && !isValidUUID(requestedPartyId)) {
+  if (requestedPartyId && !isValidUUID(requestedPartyId))
     return res.status(400).json({ error: 'party_id invalide' })
-  }
 
   try {
-    // 1. Récupérer la session
-    const { data: session, error: sessionError } = await supabase
-      .from('game_sessions')
-      .select('id, is_paid, price_cfa')
-      .eq('id', session_id)
-      .maybeSingle()
+    const { data: session } = await supabase
+      .from('game_sessions').select('id, is_paid, price_cfa')
+      .eq('id', session_id).maybeSingle()
+    if (!session) return res.status(404).json({ error: 'Session non trouvée' })
 
-    if (sessionError || !session) {
-      return res.status(404).json({ error: 'Session non trouvée' })
-    }
-
-    // 2. Trouver la party cible
     let targetPartyId: string
 
     if (requestedPartyId) {
-      const { data: party, error: partyError } = await supabase
-        .from('game_parties')
-        .select('id, min_score, min_rank, session_id')
-        .eq('id', requestedPartyId)
-        .eq('session_id', session_id)
-        .maybeSingle()
+      const { data: party } = await supabase
+        .from('game_parties').select('id, min_score, is_initial')
+        .eq('id', requestedPartyId).eq('session_id', session_id).maybeSingle()
+      if (!party) return res.status(404).json({ error: 'Groupe non trouvé' })
 
-      if (partyError || !party) {
-        return res.status(404).json({ error: 'Party non trouvée pour cette session' })
-      }
-
-      // Vérifier min_score
-      if (party.min_score !== null && party.min_score > 0) {
-        const { data: playerStats } = await supabase
-          .from('party_players')
-          .select('score')
-          .eq('user_id', userId)
-          .order('score', { ascending: false })
-          .limit(1)
-          .maybeSingle()
-
-        const userBestScore = playerStats?.score ?? 0
-        if (userBestScore < party.min_score) {
+      if (!party.is_initial && party.min_score > 0) {
+        const { data: sessionParties } = await supabase
+          .from('game_parties').select('id').eq('session_id', session_id)
+        const { data: myPlayer } = await supabase
+          .from('party_players').select('score').eq('user_id', userId)
+          .in('party_id', (sessionParties || []).map((p: any) => p.id))
+          .order('score', { ascending: false }).limit(1).maybeSingle()
+        if ((myPlayer?.score ?? 0) < party.min_score)
           return res.status(403).json({
-            error: `Score minimum requis: ${party.min_score}. Votre meilleur score: ${userBestScore}`
+            error: `Score insuffisant. Requis : ${party.min_score} pts. Votre score : ${myPlayer?.score ?? 0} pts`
           })
-        }
       }
-
-      // Vérifier min_rank
-      if (party.min_rank !== null) {
-        const { data: initialParty } = await supabase
-          .from('game_parties')
-          .select('id')
-          .eq('session_id', session_id)
-          .eq('is_initial', true)
-          .maybeSingle()
-
-        if (initialParty) {
-          const { data: rankedPlayers } = await supabase
-            .from('party_players')
-            .select('user_id, score')
-            .eq('party_id', initialParty.id)
-            .order('score', { ascending: false })
-
-          const userRank = (rankedPlayers || []).findIndex(p => p.user_id === userId) + 1
-          if (userRank === 0 || userRank > party.min_rank) {
-            return res.status(403).json({
-              error: `Rang minimum requis: top ${party.min_rank}. Votre rang: ${userRank || 'non classé'}`
-            })
-          }
-        }
-      }
-
       targetPartyId = party.id
-
     } else {
-      // Party initiale créée automatiquement par le trigger BDD
-      const { data: initialParty, error: initError } = await supabase
-        .from('game_parties')
-        .select('id')
-        .eq('session_id', session_id)
-        .eq('is_initial', true)
-        .maybeSingle()
-
-      if (initError || !initialParty) {
-        return res.status(500).json({ error: 'Party initiale introuvable pour cette session' })
-      }
-
+      const { data: initialParty } = await supabase
+        .from('game_parties').select('id')
+        .eq('session_id', session_id).eq('is_initial', true).maybeSingle()
+      if (!initialParty) return res.status(500).json({ error: 'Groupe initial introuvable' })
       targetPartyId = initialParty.id
     }
 
-    // 3. Vérifier si déjà dans la party (anti double-débit)
-    const { data: existingPlayer } = await supabase
-      .from('party_players')
-      .select('id')
-      .eq('party_id', targetPartyId)
-      .eq('user_id', userId)
-      .maybeSingle()
+    const { data: existing } = await supabase
+      .from('party_players').select('id')
+      .eq('party_id', targetPartyId).eq('user_id', userId).maybeSingle()
+    if (existing)
+      return res.json({ success: true, message: 'Déjà inscrit', party_id: targetPartyId })
 
-    if (existingPlayer) {
-      return res.json({ success: true, message: 'Déjà inscrit dans cette session' })
-    }
-
-    // 4. Gestion paiement (seulement si première party de la session)
     if (session.is_paid && session.price_cfa > 0) {
-      const sessionPartiesRes = await supabase
-        .from('game_parties')
-        .select('id')
-        .eq('session_id', session_id)
-
-      const sessionPartyIds = sessionPartiesRes.data?.map((p: any) => p.id) || []
-
-      const { data: anyPartyPlayer } = sessionPartyIds.length > 0
-        ? await supabase
-            .from('party_players')
-            .select('id')
-            .eq('user_id', userId)
-            .in('party_id', sessionPartyIds)
-            .maybeSingle()
-        : { data: null }
-
-      if (!anyPartyPlayer) {
+      const { data: sessionParties } = await supabase
+        .from('game_parties').select('id').eq('session_id', session_id)
+      const { data: anyExisting } = await supabase
+        .from('party_players').select('id').eq('user_id', userId)
+        .in('party_id', (sessionParties || []).map((p: any) => p.id)).maybeSingle()
+      if (!anyExisting) {
         const { data: profile } = await supabase
-          .from('profiles')
-          .select('solde_cfa')
-          .eq('id', userId)
-          .single()
-
-        if (!profile || profile.solde_cfa < session.price_cfa) {
+          .from('profiles').select('solde_cfa').eq('id', userId).single()
+        if (!profile || profile.solde_cfa < session.price_cfa)
           return res.status(400).json({
-            error: 'Solde insuffisant',
-            solde: profile?.solde_cfa ?? 0,
-            prix: session.price_cfa
+            error: 'Solde insuffisant', solde: profile?.solde_cfa ?? 0, prix: session.price_cfa
           })
-        }
-
-        const { error: debitError } = await supabase
-          .from('profiles')
-          .update({ solde_cfa: profile.solde_cfa - session.price_cfa })
-          .eq('id', userId)
-
-        if (debitError) throw debitError
+        await supabase.from('profiles')
+          .update({ solde_cfa: profile.solde_cfa - session.price_cfa }).eq('id', userId)
       }
     }
 
-    // 5. Ajouter le joueur dans la party
-    const { error: playerError } = await supabase
-      .from('party_players')
-      .insert({ party_id: targetPartyId, user_id: userId, score: 0 })
-
-    if (playerError && !playerError.message.includes('duplicate')) {
-      throw playerError
-    }
+    const { error: insertError } = await supabase
+      .from('party_players').insert({ party_id: targetPartyId, user_id: userId, score: 0 })
+    if (insertError && !insertError.message.includes('duplicate')) throw insertError
 
     return res.json({ success: true, message: 'Session rejointe', party_id: targetPartyId })
-
-  } catch (error: any) {
-    console.error('ERROR joinSession:', error)
-    return res.status(500).json({ error: 'Erreur rejoindre session', details: error.message })
+  } catch (err: any) {
+    console.error('ERROR joinSession:', err)
+    return res.status(500).json({ error: 'Erreur joinSession', details: err.message })
   }
 }
 
 // =====================================================
-// LIST VISIBLE RUNS
-// Appelé par le polling frontend toutes les 3s.
-// Retourne les runs is_visible=true des parties
-// où le joueur est inscrit (pour cette session).
-//
-// Logique du cycle :
-//   is_visible=false → le joueur ne voit rien (waiting)
-//   is_visible=true, is_closed=false → question en direct
-//   is_visible=true, is_closed=true  → résultats disponibles
+// LIST PARTIES FOR SESSION
 // =====================================================
 
-async function listVisibleRuns(userId: string, params: any, res: Response) {
+async function listPartiesForSession(userId: string, params: any, res: Response) {
   const { session_id } = params
-
-  if (!session_id || !isValidUUID(session_id)) {
+  if (!session_id || !isValidUUID(session_id))
     return res.status(400).json({ error: 'session_id invalide' })
-  }
-
   try {
-    // Étape 1 : toutes les parties de la session
-    const { data: sessionParties, error: spError } = await supabase
-      .from('game_parties')
-      .select('id')
-      .eq('session_id', session_id)
-
-    if (spError) throw spError
-
-    const allPartyIds = (sessionParties || []).map((p: any) => p.id)
-    if (allPartyIds.length === 0) {
-      return res.json({ success: true, runs: [] })
-    }
-
-    // Étape 2 : parties où le joueur est inscrit
-    const { data: playerParties, error: ppError } = await supabase
-      .from('party_players')
-      .select('party_id')
-      .eq('user_id', userId)
-      .in('party_id', allPartyIds)
-
-    if (ppError) throw ppError
-
-    const partyIds = (playerParties || []).map((p: any) => p.party_id)
-    if (partyIds.length === 0) {
-      return res.json({ success: true, runs: [] })
-    }
-
-    // Étape 3 : runs visibles (is_visible=true) de ces parties
-    const { data: runs, error: runsError } = await supabase
-      .from('game_runs')
-      .select('id, title, is_visible, is_closed, is_started')
-      .in('party_id', partyIds)
-      .eq('is_visible', true)
-      .order('created_at', { ascending: true })
-
-    if (runsError) throw runsError
-
-    return res.json({ success: true, runs: runs || [] })
-
-  } catch (error: any) {
-    console.error('ERROR listVisibleRuns:', error)
-    return res.status(500).json({ error: 'Erreur liste runs', details: error.message })
+    const { data: parties, error } = await supabase
+      .from('game_parties').select('id, title, is_initial, min_score, min_rank')
+      .eq('session_id', session_id).order('created_at', { ascending: true })
+    if (error) throw error
+    return res.json({ success: true, parties: parties || [] })
+  } catch (err: any) {
+    console.error('ERROR listPartiesForSession:', err)
+    return res.status(500).json({ error: 'Erreur groupes', details: err.message })
   }
 }
 
 // =====================================================
-// GET QUESTIONS
-// ✅ Lit depuis view_run_questions (vue sécurisée BDD)
-//    - Si run non fermé  → correct_answer = NULL (masqué par la vue)
-//    - Si run fermé      → correct_answer = true/false (révélé par trigger)
-//
-// Utilisé dans deux contextes :
-//   1. Avant réponse (is_closed=false) → afficher la question sans réponse
-//   2. Après fermeture (is_closed=true) → afficher la bonne réponse + score
+// GET UNANSWERED QUESTIONS
+// correct_answer JAMAIS retourné
 // =====================================================
 
-async function getQuestions(userId: string, params: any, res: Response) {
-  const { run_id } = params
-
-  if (!run_id || !isValidUUID(run_id)) {
-    return res.status(400).json({ error: 'run_id invalide' })
-  }
-
+async function getUnansweredQuestions(userId: string, params: any, res: Response) {
+  const { party_id } = params
+  if (!party_id || !isValidUUID(party_id))
+    return res.status(400).json({ error: 'party_id invalide' })
   try {
-    // Vérifier le run et l'appartenance du joueur
-    const { data: run, error: runError } = await supabase
-      .from('game_runs')
-      .select('is_visible, is_closed, party_id, reveal_answers')
-      .eq('id', run_id)
-      .maybeSingle()
-
-    if (runError) throw runError
-    if (!run) return res.status(404).json({ error: 'Run non trouvé' })
-
-    // Un run non visible n'est accessible qu'après fermeture (pour l'historique)
-    // mais le polling ne devrait jamais envoyer un run non visible
-    if (!run.is_visible && !run.is_closed) {
-      return res.status(403).json({ error: 'Run non visible' })
-    }
-
-    // Vérifier que le joueur est bien inscrit dans la party
     const { data: player } = await supabase
-      .from('party_players')
-      .select('id')
-      .eq('party_id', run.party_id)
-      .eq('user_id', userId)
-      .maybeSingle()
+      .from('party_players').select('id')
+      .eq('party_id', party_id).eq('user_id', userId).maybeSingle()
+    if (!player) return res.status(403).json({ error: "Rejoignez d'abord la session" })
 
-    if (!player) {
-      return res.status(403).json({ error: "Rejoignez d'abord la session" })
-    }
+    const { data: runs } = await supabase
+      .from('game_runs').select('id')
+      .eq('party_id', party_id).eq('is_visible', true).eq('is_closed', false)
+    if (!runs || runs.length === 0) return res.json({ success: true, questions: [] })
 
-    // Lire depuis view_run_questions :
-    // → correct_answer est NULL si reveal_answers=false (joueur ne peut pas tricher)
-    // → correct_answer est true/false si reveal_answers=true (run fermé par trigger)
-    const { data: questions, error: qError } = await supabase
-      .from('view_run_questions')
-      .select('id, question_text, score, correct_answer')
-      .eq('run_id', run_id)
-      .order('created_at', { ascending: true })
+    const runIds = runs.map((r: any) => r.id)
 
-    if (qError) throw qError
+    const { data: allQs, error: qErr } = await supabase
+      .from('run_questions').select('id, run_id, question_text, score').in('run_id', runIds)
+    if (qErr) throw qErr
 
-    // Récupérer les réponses déjà données par ce joueur
     const { data: answers } = await supabase
-      .from('user_run_answers')
-      .select('run_question_id, answer, score_awarded')
-      .eq('run_id', run_id)
-      .eq('user_id', userId)
+      .from('user_run_answers').select('run_question_id')
+      .in('run_id', runIds).eq('user_id', userId)
 
-    const answersMap = new Map(
-      (answers || []).map(a => [a.run_question_id, { answer: a.answer, score_awarded: a.score_awarded }])
-    )
-
-    const questionsWithStatus = (questions || []).map(q => ({
-      id:            q.id,
-      question_text: q.question_text,
-      score:         q.score,
-      correct_answer: q.correct_answer, // null si run pas encore fermé
-      answered:      answersMap.has(q.id),
-      my_answer:     answersMap.get(q.id)?.answer ?? null,
-      score_awarded: answersMap.get(q.id)?.score_awarded ?? null,
-    }))
+    const answeredIds = new Set((answers || []).map((a: any) => a.run_question_id))
 
     return res.json({
-      success:        true,
-      questions:      questionsWithStatus,
-      is_closed:      run.is_closed,
-      reveal_answers: run.reveal_answers,
+      success: true,
+      questions: (allQs || [])
+        .filter((q: any) => !answeredIds.has(q.id))
+        .map((q: any) => ({
+          id: q.id, run_id: q.run_id,
+          question_text: q.question_text, score: q.score
+        }))
     })
-
-  } catch (error: any) {
-    console.error('ERROR getQuestions:', error)
-    return res.status(500).json({ error: 'Erreur questions', details: error.message })
+  } catch (err: any) {
+    console.error('ERROR getUnansweredQuestions:', err)
+    return res.status(500).json({ error: 'Erreur questions', details: err.message })
   }
 }
 
 // =====================================================
 // SUBMIT ANSWER
-// Note : auth.uid() géré côté frontend (Supabase Auth).
+// correct_answer calculé en interne, JAMAIS retourné
+// score_awarded stocké en BDD, JAMAIS retourné ici
 // =====================================================
 
 async function submitAnswer(userId: string, params: any, res: Response) {
   const { run_question_id, answer } = params
 
-  if (!run_question_id || !isValidUUID(run_question_id)) {
+  if (!run_question_id || !isValidUUID(run_question_id))
     return res.status(400).json({ error: 'run_question_id invalide' })
-  }
-  if (typeof answer !== 'boolean') {
-    return res.status(400).json({ error: 'answer doit être un boolean' })
-  }
+  if (typeof answer !== 'boolean')
+    return res.status(400).json({ error: 'answer doit être true ou false' })
 
   try {
-    // Vérifier que la question existe et récupérer run_id
     const { data: rq, error: rqErr } = await supabase
-      .from('run_questions')
-      .select('id, run_id')
-      .eq('id', run_question_id)
-      .maybeSingle()
-
+      .from('run_questions').select('id, run_id, correct_answer, score')
+      .eq('id', run_question_id).maybeSingle()
     if (rqErr) throw rqErr
     if (!rq) return res.status(404).json({ error: 'Question non trouvée' })
 
-    // Vérifier que le run est ouvert
     const { data: run, error: runErr } = await supabase
-      .from('game_runs')
-      .select('id, party_id, is_closed, is_visible')
-      .eq('id', rq.run_id)
-      .maybeSingle()
-
+      .from('game_runs').select('id, party_id, is_closed, is_visible')
+      .eq('id', rq.run_id).maybeSingle()
     if (runErr) throw runErr
-    if (!run) return res.status(404).json({ error: 'Run non trouvé' })
-    if (run.is_closed) return res.status(403).json({ error: 'Run fermé — plus de réponses acceptées' })
+    if (!run)            return res.status(404).json({ error: 'Run non trouvé' })
+    if (run.is_closed)   return res.status(403).json({ error: 'Run fermé' })
     if (!run.is_visible) return res.status(403).json({ error: 'Run non visible' })
 
-    // Vérifier que l'utilisateur est bien inscrit dans la party
-    const { data: player } = await supabase
-      .from('party_players')
-      .select('id, score')
-      .eq('party_id', run.party_id)
-      .eq('user_id', userId)
-      .maybeSingle()
-
+    const { data: player, error: playerErr } = await supabase
+      .from('party_players').select('id, score')
+      .eq('party_id', run.party_id).eq('user_id', userId).maybeSingle()
+    if (playerErr) throw playerErr
     if (!player) return res.status(403).json({ error: "Rejoignez d'abord la session" })
 
-    // Vérifier si déjà répondu
     const { data: existing } = await supabase
-      .from('user_run_answers')
-      .select('id')
-      .eq('run_question_id', run_question_id)
-      .eq('user_id', userId)
-      .maybeSingle()
-
+      .from('user_run_answers').select('id')
+      .eq('run_question_id', run_question_id).eq('user_id', userId).maybeSingle()
     if (existing) return res.status(400).json({ error: 'Déjà répondu à cette question' })
 
-    // Essayer le RPC d'abord (avec user_id explicite si supporté)
-    const { error: rpcError } = await supabase.rpc('submit_answer', {
-      p_run_question_id: run_question_id,
-      p_user_id: userId,
-      p_answer: answer
+    // Calcul interne — JAMAIS retourné
+    const scoreAwarded = (rq.correct_answer === answer) ? (rq.score ?? 0) : 0
+
+    const { error: insertErr } = await supabase.from('user_run_answers').insert({
+      run_id: rq.run_id, run_question_id, user_id: userId,
+      answer, score_awarded: scoreAwarded,
     })
-
-    if (rpcError) {
-      // Si le RPC ne supporte pas p_user_id, insérer directement
-      const { data: qData } = await supabase
-        .from('run_questions')
-        .select('correct_answer, score')
-        .eq('id', run_question_id)
-        .maybeSingle()
-
-      const scoreAwarded = qData?.correct_answer === answer ? (qData?.score ?? 0) : 0
-
-      const { error: insertErr } = await supabase
-        .from('user_run_answers')
-        .insert({
-          run_id: rq.run_id,
-          run_question_id,
-          user_id: userId,
-          answer,
-          score_awarded: scoreAwarded,
-        })
-
-      if (insertErr) {
-        if (insertErr.message.includes('duplicate') || insertErr.code === '23505') {
-          return res.status(400).json({ error: 'Déjà répondu à cette question' })
-        }
-        throw insertErr
-      }
-
-      // Mettre à jour le score cumulé dans party_players
-      await supabase
-        .from('party_players')
-        .update({ score: (player.score ?? 0) + scoreAwarded })
-        .eq('party_id', run.party_id)
-        .eq('user_id', userId)
+    if (insertErr) {
+      if (insertErr.code === '23505')
+        return res.status(400).json({ error: 'Déjà répondu à cette question' })
+      throw insertErr
     }
 
-    return res.json({ success: true, message: 'Réponse enregistrée' })
+    await supabase.from('party_players')
+      .update({ score: (player.score ?? 0) + scoreAwarded })
+      .eq('party_id', run.party_id).eq('user_id', userId)
 
-  } catch (error: any) {
-    console.error('ERROR submitAnswer:', error)
-    return res.status(500).json({ error: 'Erreur réponse', details: error.message })
+    // Uniquement success — aucun score, aucune bonne réponse
+    return res.json({ success: true })
+  } catch (err: any) {
+    console.error('ERROR submitAnswer:', err)
+    return res.status(500).json({ error: 'Erreur soumission', details: err.message })
   }
 }
 
 // =====================================================
-// GET LEADERBOARD
-// Score spécifique au run (user_run_answers.score_awarded)
-// et non le score cumulé de la party
+// ONGLET 3 — MES RÉPONSES
+// Ma réponse uniquement — correct_answer et score ABSENTS
 // =====================================================
 
-async function getLeaderboard(userId: string, params: any, res: Response) {
-  const { run_id } = params
-
-  if (!run_id || !isValidUUID(run_id)) {
-    return res.status(400).json({ error: 'run_id invalide' })
-  }
-
-  try {
-    const { data: run, error: runError } = await supabase
-      .from('game_runs')
-      .select('party_id, is_closed')
-      .eq('id', run_id)
-      .maybeSingle()
-
-    if (runError) throw runError
-    if (!run) return res.status(404).json({ error: 'Run non trouvé' })
-
-    // Scores spécifiques à ce run
-    const { data: runScores, error: scoresError } = await supabase
-      .from('user_run_answers')
-      .select('user_id, score_awarded')
-      .eq('run_id', run_id)
-
-    if (scoresError) throw scoresError
-
-    const scoreMap = new Map<string, number>()
-    for (const row of runScores || []) {
-      scoreMap.set(row.user_id, (scoreMap.get(row.user_id) ?? 0) + row.score_awarded)
-    }
-
-    // Joueurs de la party avec profils
-    const { data: players, error: playersError } = await supabase
-      .from('party_players')
-      .select(`
-        user_id,
-        profiles:user_id (nom, prenom, avatar_url)
-      `)
-      .eq('party_id', run.party_id)
-
-    if (playersError) throw playersError
-
-    const leaderboard = (players || [])
-      .map((p: any) => ({
-        user_id:         p.user_id,
-        run_score:       scoreMap.get(p.user_id) ?? 0,
-        nom:             p.profiles?.nom    || 'Joueur',
-        prenom:          p.profiles?.prenom || '',
-        avatar_url:      p.profiles?.avatar_url ?? null,
-        is_current_user: p.user_id === userId,
-      }))
-      .sort((a, b) => b.run_score - a.run_score)
-      .map((p, index) => ({ rank: index + 1, ...p }))
-
-    return res.json({ success: true, leaderboard, is_closed: run.is_closed })
-
-  } catch (error: any) {
-    console.error('ERROR getLeaderboard:', error)
-    return res.status(500).json({ error: 'Erreur classement', details: error.message })
-  }
-}
-
-
-// =====================================================
-// GET UNANSWERED QUESTIONS
-// Toutes les questions VISIBLES non encore répondues par l'utilisateur
-// dans tous les runs de la party
-// =====================================================
-
-async function getUnansweredQuestions(userId: string, params: any, res: Response) {
+async function getMyAnswers(userId: string, params: any, res: Response) {
   const { party_id } = params
-
-  if (!party_id || !isValidUUID(party_id)) {
+  if (!party_id || !isValidUUID(party_id))
     return res.status(400).json({ error: 'party_id invalide' })
-  }
-
   try {
-    // Runs visibles de cette party
-    const { data: runs, error: runsError } = await supabase
-      .from('game_runs')
-      .select('id, title, is_visible, is_closed')
-      .eq('party_id', party_id)
-      .eq('is_visible', true)
+    const { data: player } = await supabase
+      .from('party_players').select('id')
+      .eq('party_id', party_id).eq('user_id', userId).maybeSingle()
+    if (!player) return res.status(403).json({ error: 'Non membre de ce groupe' })
 
-    if (runsError) throw runsError
-    if (!runs || runs.length === 0) {
-      return res.json({ success: true, questions: [] })
-    }
+    const { data: runs, error: runsErr } = await supabase
+      .from('game_runs').select('id, title')
+      .eq('party_id', party_id).eq('is_visible', true)
+      .order('created_at', { ascending: true })
+    if (runsErr) throw runsErr
+    if (!runs || runs.length === 0) return res.json({ success: true, runs: [] })
 
     const runIds = runs.map((r: any) => r.id)
 
-    // Toutes les questions de ces runs (vue sécurisée)
-    const { data: allQs, error: qError } = await supabase
-      .from('view_run_questions')
-      .select('id, run_id, question_text, score, correct_answer')
-      .in('run_id', runIds)
+    // answer seulement — PAS score_awarded
+    const { data: myAnswers, error: aErr } = await supabase
+      .from('user_run_answers').select('run_question_id, run_id, answer')
+      .in('run_id', runIds).eq('user_id', userId)
+    if (aErr) throw aErr
+    if (!myAnswers || myAnswers.length === 0) return res.json({ success: true, runs: [] })
 
-    if (qError) throw qError
+    const qIds = myAnswers.map((a: any) => a.run_question_id)
 
-    // Réponses déjà soumises par l'utilisateur
-    const { data: answers, error: aError } = await supabase
-      .from('user_run_answers')
-      .select('run_question_id')
-      .in('run_id', runIds)
-      .eq('user_id', userId)
+    // question_text et score — PAS correct_answer
+    const { data: questions, error: qErr } = await supabase
+      .from('run_questions').select('id, run_id, question_text, score').in('id', qIds)
+    if (qErr) throw qErr
 
-    if (aError) throw aError
+    const qMap = new Map((questions || []).map((q: any) => [q.id, q]))
 
-    const answeredIds = new Set((answers || []).map((a: any) => a.run_question_id))
-
-    // Filtrer non-répondues
-    // correct_answer est masqué par la vue si le run n'est pas fermé
-    const unanswered = (allQs || [])
-      .filter((q: any) => !answeredIds.has(q.id))
-      .map((q: any) => ({
-        id: q.id,
-        run_id: q.run_id,
-        question_text: q.question_text,
-        score: q.score,
-        correct_answer: null, // masqué avant révélation
-        answered: false,
-        my_answer: null,
-        score_awarded: null,
+    const result = runs
+      .map((run: any) => ({
+        run_id: run.id, run_title: run.title,
+        questions: myAnswers
+          .filter((a: any) => a.run_id === run.id)
+          .map((a: any) => {
+            const q = qMap.get(a.run_question_id)
+            return {
+              id: a.run_question_id,
+              question_text: q?.question_text ?? '',
+              score: q?.score ?? 0,
+              my_answer: a.answer,
+              // correct_answer : ABSENT — jamais ici
+              // score_awarded  : ABSENT — seulement dans getMyResults
+            }
+          })
       }))
+      .filter((r: any) => r.questions.length > 0)
 
-    return res.json({ success: true, questions: unanswered })
-
-  } catch (error: any) {
-    console.error('ERROR getUnansweredQuestions:', error)
-    return res.status(500).json({ error: 'Erreur questions non-répondues', details: error.message })
+    return res.json({ success: true, runs: result })
+  } catch (err: any) {
+    console.error('ERROR getMyAnswers:', err)
+    return res.status(500).json({ error: 'Erreur mes réponses', details: err.message })
   }
 }
 
 // =====================================================
-// GET PARTY HISTORY
-// Retourne toutes les questions fermées (reveal_answers=true)
-// de la party, avec la réponse de l'utilisateur et le score total
+// ONGLET 4 — MES RÉSULTATS
+// correct_answer + score_awarded UNIQUEMENT si
+//   is_closed = true ET reveal_answers = true
 // =====================================================
 
-async function getPartyHistory(userId: string, params: any, res: Response) {
+async function getMyResults(userId: string, params: any, res: Response) {
   const { party_id } = params
-
-  if (!party_id || !isValidUUID(party_id)) {
+  if (!party_id || !isValidUUID(party_id))
     return res.status(400).json({ error: 'party_id invalide' })
-  }
-
   try {
-    // Score total de l'utilisateur dans cette party
-    const { data: playerData } = await supabase
-      .from('party_players')
-      .select('score')
-      .eq('party_id', party_id)
-      .eq('user_id', userId)
-      .maybeSingle()
+    const { data: player } = await supabase
+      .from('party_players').select('id, score')
+      .eq('party_id', party_id).eq('user_id', userId).maybeSingle()
+    if (!player) return res.status(403).json({ error: 'Non membre de ce groupe' })
 
-    const totalScore = playerData?.score ?? null // null = pas encore inscrit
-
-    // Tous les runs fermés de cette party
-    const { data: runs, error: runsError } = await supabase
-      .from('game_runs')
-      .select('id, title, is_closed, reveal_answers')
+    // Runs fermés ET révélés — double condition
+    const { data: revealedRuns, error: runsErr } = await supabase
+      .from('game_runs').select('id, title')
       .eq('party_id', party_id)
       .eq('is_closed', true)
       .eq('reveal_answers', true)
       .order('created_at', { ascending: true })
+    if (runsErr) throw runsErr
 
-    if (runsError) throw runsError
-    if (!runs || runs.length === 0) {
-      return res.json({ success: true, history: [], total_score: totalScore, is_member: totalScore !== null })
+    if (!revealedRuns || revealedRuns.length === 0) {
+      return res.json({
+        success: true, total_score: 0, runs: [], pending: true,
+        message: "Les résultats seront révélés par l'administrateur à la fin du jeu."
+      })
     }
 
-    const runIds = runs.map((r: any) => r.id)
+    const runIds = revealedRuns.map((r: any) => r.id)
 
-    // Guard: si aucun run, retourner vide
-    if (runIds.length === 0) {
-      return res.json({ success: true, history: [], total_score: totalScore, is_member: totalScore !== null })
-    }
+    // Vue sécurisée — correct_answer visible car reveal_answers=true
+    const { data: questions, error: qErr } = await supabase
+      .from('view_run_questions').select('id, run_id, question_text, score, correct_answer')
+      .in('run_id', runIds)
+    if (qErr) throw qErr
 
-    // Toutes les questions de ces runs
-    let questions: any[] = []
-    let answers: any[] = []
+    // score_awarded visible car run révélé
+    const { data: myAnswers, error: aErr } = await supabase
+      .from('user_run_answers').select('run_question_id, run_id, answer, score_awarded')
+      .in('run_id', runIds).eq('user_id', userId)
+    if (aErr) throw aErr
 
-    try {
-      const qRes = await supabase
-        .from('run_questions')
-        .select('id, run_id, question_text, correct_answer, score')
-        .in('run_id', runIds)
-      if (qRes.error) throw qRes.error
-      questions = qRes.data || []
-    } catch (e: any) {
-      console.error('getPartyHistory questions error:', e.message)
-      // Continuer avec questions vides plutôt que planter
-    }
+    const aMap = new Map((myAnswers || []).map((a: any) => [a.run_question_id, a]))
+    const totalScore = (myAnswers || []).reduce((sum: number, a: any) => sum + (a.score_awarded ?? 0), 0)
 
-    try {
-      const aRes = await supabase
-        .from('user_run_answers')
-        .select('run_question_id, answer, score_awarded')
-        .in('run_id', runIds)
-        .eq('user_id', userId)
-      if (aRes.error) throw aRes.error
-      answers = aRes.data || []
-    } catch (e: any) {
-      console.error('getPartyHistory answers error:', e.message)
-    }
-
-    const answerMap = new Map<string, { answer: boolean; score_awarded: number }>(
-      (answers || []).map((a: any) => [a.run_question_id, { answer: a.answer, score_awarded: a.score_awarded }])
-    )
-
-    // Grouper questions par run
-    const runMap = new Map((runs || []).map((r: any) => [r.id, { ...r, questions: [] as any[] }]))
-
-    for (const q of questions || []) {
-      const myAnswer = answerMap.get(q.id)
-      const entry = {
-        id:            q.id,
-        question_text: q.question_text,
-        correct_answer: q.correct_answer,
-        score:         q.score,
-        my_answer:     myAnswer?.answer ?? null,
-        score_awarded: myAnswer?.score_awarded ?? null,
-        answered:      !!myAnswer,
-      }
-      const run = runMap.get(q.run_id)
-      if (run) run.questions.push(entry)
-    }
-
-    const history = Array.from(runMap.values()).map(r => ({
-      run_id:    r.id,
-      run_title: r.title,
-      questions: r.questions,
+    const runs = revealedRuns.map((run: any) => ({
+      run_id: run.id, run_title: run.title,
+      questions: (questions || [])
+        .filter((q: any) => q.run_id === run.id)
+        .map((q: any) => {
+          const a = aMap.get(q.id)
+          return {
+            id: q.id,
+            question_text: q.question_text,
+            score: q.score,
+            correct_answer: q.correct_answer,   // visible — admin a révélé
+            my_answer: a?.answer ?? null,
+            score_awarded: a?.score_awarded ?? 0,
+            answered: !!a,
+          }
+        })
     }))
 
-    return res.json({
-      success:     true,
-      history,
-      total_score: totalScore,
-      is_member:   totalScore !== null,
-    })
-
-  } catch (error: any) {
-    console.error('ERROR getPartyHistory:', error)
-    return res.status(500).json({ error: 'Erreur historique', details: error.message })
+    return res.json({ success: true, total_score: totalScore, runs, pending: false })
+  } catch (err: any) {
+    console.error('ERROR getMyResults:', err)
+    return res.status(500).json({ error: 'Erreur résultats', details: err.message })
   }
 }
