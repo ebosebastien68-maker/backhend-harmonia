@@ -380,7 +380,9 @@ async function getMyAnswers(userId: string, db: any, params: any, res: Response)
       .from('run_questions').select('id, run_id, question_text, score').in('id', qIds)
     if (qErr) throw qErr
 
-    const qMap = new Map((questions || []).map((q: any) => [q.id, q]))
+    const qMap = new Map<string, { question_text: string; score: number }>(
+      (questions || []).map((q: any) => [q.id, q])
+    )
 
     const result = runs
       .map((run: any) => ({
@@ -465,7 +467,9 @@ async function getMyResults(userId: string, db: any, params: any, res: Response)
       .in('run_id', runIds).eq('user_id', userId)
     if (aErr) throw aErr
 
-    const aMap = new Map((myAnswers || []).map((a: any) => [a.run_question_id, a]))
+    const aMap = new Map<string, { answer: boolean; score_awarded: number }>(
+      (myAnswers || []).map((a: any) => [a.run_question_id, a])
+    )
 
     // Score total = somme des points des runs révélés UNIQUEMENT
     const totalScore = (myAnswers || []).reduce(
