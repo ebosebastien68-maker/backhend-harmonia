@@ -1,41 +1,47 @@
 // =====================================================
-// CONFIGURATION SUPABASE — CLÉ ANON UNIQUEMENT
+// CONFIGURATION SUPABASE — DEUX CLIENTS
 // =====================================================
 //
-// ⚠️  RÈGLE ABSOLUE : On n'utilise JAMAIS la SERVICE_ROLE_KEY ici.
+// 1. supabaseAdmin (SERVICE_ROLE)
+//    → Disponible pour les autres fichiers du backend
+//    → game.ts ne l'utilise PAS — tout passe par RPC ou ANON+JWT
 //
-// Pourquoi la clé ANON et pas SERVICE_ROLE ?
-// ─────────────────────────────────────────
-// La SERVICE_ROLE_KEY bypass complètement les RLS (Row Level Security).
-// Cela signifie que n'importe quelle requête peut lire correct_answer,
-// score_awarded ou n'importe quelle donnée sensible, même si l'admin
-// n'a pas encore révélé les résultats. C'est une faille de sécurité grave.
-//
-// Avec la clé ANON :
-//   → Les politiques RLS de Supabase sont ACTIVES
-//   → view_run_questions masque correct_answer tant que reveal_answers=false
-//   → Seules les routes backend explicitement codées peuvent lire les données
-//   → Le backend passe userId manuellement dans chaque requête
+// 2. getClientForUser(accessToken)
+//    → Clé ANON + JWT de l'utilisateur
+//    → auth.uid() fonctionne → RLS Supabase actif
+//    → Utilisé dans game.ts pour toutes les opérations
 //
 // =====================================================
 
 import { createClient, SupabaseClient } from '@supabase/supabase-js'
 
-const supabaseUrl  = process.env.SUPABASE_URL
-const supabaseAnon = process.env.SUPABASE_ANON_KEY   // ← ANON, jamais SERVICE_ROLE
+const SUPABASE_URL         = process.env.SUPABASE_URL
+const SUPABASE_ANON_KEY    = process.env.SUPABASE_ANON_KEY
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY
 
-if (!supabaseUrl)  throw new Error('❌ SUPABASE_URL manquante dans les variables Render')
-if (!supabaseAnon) throw new Error('❌ SUPABASE_ANON_KEY manquante dans les variables Render')
+if (!SUPABASE_URL)         throw new Error('❌ SUPABASE_URL manquante dans Render')
+if (!SUPABASE_ANON_KEY)    throw new Error('❌ SUPABASE_ANON_KEY manquante dans Render')
+if (!SUPABASE_SERVICE_KEY) throw new Error('❌ SUPABASE_SERVICE_KEY manquante dans Render')
 
-const supabase: SupabaseClient = createClient(supabaseUrl, supabaseAnon, {
-  auth: {
-    autoRefreshToken: false,
-    persistSession:   false,
-  }
-})
+// ── Client Admin (SERVICE_ROLE) ───────────────────────────────
+// Pour les autres fichiers backend qui en ont besoin
+// game.ts n'utilise PAS ce client
+export const supabaseAdmin: SupabaseClient = createClient(
+  SUPABASE_URL,
+  SUPABASE_SERVICE_KEY,
+  { auth: { autoRefreshToken: false, persistSession: false } }
+)
 
-if (process.env.NODE_ENV === 'development') {
-  console.log('✅ Client Supabase initialisé avec la clé ANON (RLS actif)')
+// ── Client utilisateur (ANON + JWT) ──────────────────────────
+// auth.uid() fonctionne → RLS actif
+// game.ts utilise UNIQUEMENT ce client
+export function getClientForUser(accessToken: string): SupabaseClient {
+  return createClient(SUPABASE_URL!, SUPABASE_ANON_KEY!, {
+    global: { headers: { Authorization: `Bearer ${accessToken}` } },
+    auth:   { autoRefreshToken: false, persistSession: false }
+  })
 }
 
-export default supabase
+if (process.env.NODE_ENV === 'development') {
+  console.log('✅ Supabase initialisé — SERVICE_ROLE (autres fichiers) + ANON+JWT (game.ts)')
+}
