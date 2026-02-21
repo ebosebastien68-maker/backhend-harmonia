@@ -353,6 +353,9 @@ async function setStarted(params: any, res: Response) {
 
 // =====================================================
 // SET VISIBILITY — ÉTAPE 2
+// UPDATE direct au lieu de RPC : la RPC set_run_visibility contient
+// un check auth.uid() qui retourne NULL avec Service Role → exception.
+// UPDATE direct avec supabaseAdmin bypass RLS sans passer par la RPC.
 // =====================================================
 
 async function setVisibility(params: any, res: Response) {
@@ -363,28 +366,29 @@ async function setVisibility(params: any, res: Response) {
   }
 
   try {
+    const { data: run } = await supabase
+      .from('game_runs')
+      .select('is_started, is_closed')
+      .eq('id', run_id)
+      .maybeSingle()
+
+    if (!run) return res.status(404).json({ error: 'Run non trouvé' })
+
     if (visible) {
-      const { data: run } = await supabase
-        .from('game_runs')
-        .select('is_started, is_closed')
-        .eq('id', run_id)
-        .maybeSingle()
-
-      if (!run) return res.status(404).json({ error: 'Run non trouvé' })
-
       if (!run.is_started) {
         return res.status(400).json({ error: 'Démarrez le run (setStarted) avant de le rendre visible' })
       }
-
       if (run.is_closed) {
         return res.status(400).json({ error: 'Run déjà fermé — impossible de le rendre visible' })
       }
     }
 
-    const { error } = await supabase.rpc('set_run_visibility', {
-      p_run_id:  run_id,
-      p_visible: visible
-    })
+    // UPDATE direct — supabaseAdmin (Service Role) bypass RLS sans auth.uid()
+    const { error } = await supabase
+      .from('game_runs')
+      .update({ is_visible: visible })
+      .eq('id', run_id)
+
     if (error) { logSupabaseError('setVisibility', error); throw error }
 
     console.log(`✅ is_visible = ${visible} pour run: ${run_id}`)
@@ -398,6 +402,9 @@ async function setVisibility(params: any, res: Response) {
 
 // =====================================================
 // CLOSE RUN — ÉTAPE 3
+// UPDATE direct au lieu de RPC : même raison que setVisibility.
+// Le trigger sync_reveal_on_close se déclenche sur UPDATE direct aussi
+// → reveal_answers = true géré automatiquement par la BDD.
 // =====================================================
 
 async function closeRun(params: any, res: Response) {
@@ -408,13 +415,22 @@ async function closeRun(params: any, res: Response) {
   }
 
   try {
-    const { error } = await supabase.rpc('set_run_closed', {
-      p_run_id: run_id,
-      p_closed: closed
-    })
+    // UPDATE direct — le trigger sync_reveal_on_close se déclenche quand même
+    // et passe reveal_answers = true automatiquement
+    const updatePayload: any = { is_closed: closed }
+    if (!closed) {
+      // Réouverture : remettre reveal_answers à false aussi
+      updatePayload.reveal_answers = false
+    }
+
+    const { error } = await supabase
+      .from('game_runs')
+      .update(updatePayload)
+      .eq('id', run_id)
+
     if (error) { logSupabaseError('closeRun', error); throw error }
 
-    console.log(`✅ is_closed = ${closed} pour run: ${run_id}`)
+    console.log(`✅ is_closed = ${closed} pour run: ${run_id} | reveal_answers géré par trigger BDD`)
     return res.json({
       success: true,
       message: closed
