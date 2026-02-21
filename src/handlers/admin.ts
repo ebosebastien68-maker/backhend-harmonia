@@ -1,11 +1,9 @@
 // =====================================================
 // HANDLER ADMIN - VERSION SÉCURISÉE
-// CORRECTION CRITIQUE :
-//   Le signInWithPassword utilisait supabaseAdmin (singleton Service Role),
-//   ce qui corrompait son état auth in-memory et faisait échouer toutes
-//   les opérations DB suivantes (RLS appliqué au lieu du Service Role).
-//   → Fix : client auth temporaire jetable pour la vérification credentials.
-//     supabaseAdmin reste intact avec la Service Role key pour toutes les BDD ops.
+// CORRECTIONS :
+//   [v2] Client auth temporaire jetable → supabaseAdmin intact (Service Role)
+//   [v3] deleteRun : autorise suppression si run fermé (is_closed=true)
+//   [v3] Logging détaillé : code + message + details Supabase pour debug
 // =====================================================
 
 import { Request, Response } from 'express'
@@ -17,14 +15,19 @@ const isValidUUID = (id: string) =>
 
 // ─── Client temporaire pour vérification credentials uniquement ───────────────
 // NE PAS utiliser supabaseAdmin pour signInWithPassword : ça mute son état
-// in-memory et remplace la Service Role key par le JWT utilisateur pour
-// toutes les requêtes DB suivantes → échec RLS sur DELETE/UPDATE.
+// in-memory et remplace la Service Role key par le JWT utilisateur →
+// toutes les requêtes DB suivantes échouent (RLS au lieu de Service Role).
 function createAuthClient() {
   return createClient(
     process.env.SUPABASE_URL!,
     process.env.SUPABASE_ANON_KEY!,
     { auth: { autoRefreshToken: false, persistSession: false } }
   )
+}
+
+// ─── Helper logging Supabase ──────────────────────────────────────────────────
+function logSupabaseError(context: string, error: any) {
+  console.error(`❌ [${context}] Code: ${error?.code} | Message: ${error?.message} | Details: ${error?.details} | Hint: ${error?.hint}`)
 }
 
 export async function handleAdmin(req: Request, res: Response) {
@@ -38,8 +41,6 @@ export async function handleAdmin(req: Request, res: Response) {
 
   try {
     // ========== AUTHENTIFICATION (client temporaire jetable) ==========
-    // On utilise un client ANON+JWT éphémère pour vérifier les credentials.
-    // supabaseAdmin (Service Role) n'est jamais touché → reste intact pour les BDD ops.
     const authClient = createAuthClient()
     const { data: authData, error: authError } = await authClient.auth.signInWithPassword({
       email: email.trim(),
@@ -51,7 +52,7 @@ export async function handleAdmin(req: Request, res: Response) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' })
     }
 
-    // ========== VÉRIFICATION PROFIL + RÔLE (supabaseAdmin — Service Role) ==========
+    // ========== VÉRIFICATION PROFIL + RÔLE ==========
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('id, role, nom, prenom')
@@ -59,6 +60,7 @@ export async function handleAdmin(req: Request, res: Response) {
       .maybeSingle()
 
     if (profileError || !profile) {
+      logSupabaseError('getProfile', profileError)
       return res.status(403).json({ error: 'Profil inexistant' })
     }
 
@@ -75,7 +77,6 @@ export async function handleAdmin(req: Request, res: Response) {
       })
     }
 
-    // ========== CAS SPÉCIAL : LOGIN ==========
     if (functionName === 'login') {
       return res.json({
         success: true,
@@ -107,7 +108,7 @@ export async function handleAdmin(req: Request, res: Response) {
     }
 
   } catch (error: any) {
-    console.error(`💥 CRASH ADMIN:`, error)
+    console.error(`💥 CRASH ADMIN [${req.body?.function}]:`, error?.message, error?.stack)
     return res.status(500).json({ error: 'Erreur serveur', details: error.message })
   }
 }
@@ -169,13 +170,13 @@ async function createSession(adminId: string, params: any, res: Response) {
       .select()
       .single()
 
-    if (error) throw error
+    if (error) { logSupabaseError('createSession', error); throw error }
 
     console.log(`✅ Session créée: ${data.id}`)
     return res.json({ success: true, session_id: data.id, message: 'Session créée' })
 
   } catch (error: any) {
-    console.error('ERROR createSession:', error)
+    console.error('ERROR createSession:', error.message)
     return res.status(500).json({ error: 'Erreur création session', details: error.message })
   }
 }
@@ -209,13 +210,13 @@ async function createParty(adminId: string, params: any, res: Response) {
       .select()
       .single()
 
-    if (error) throw error
+    if (error) { logSupabaseError('createParty', error); throw error }
 
     console.log(`✅ Party créée: ${data.id}`)
     return res.json({ success: true, party_id: data.id, message: 'Party créée' })
 
   } catch (error: any) {
-    console.error('ERROR createParty:', error)
+    console.error('ERROR createParty:', error.message)
     return res.status(500).json({ error: 'Erreur création party', details: error.message })
   }
 }
@@ -250,13 +251,13 @@ async function createRun(adminId: string, params: any, res: Response) {
       .select()
       .single()
 
-    if (error) throw error
+    if (error) { logSupabaseError('createRun', error); throw error }
 
     console.log(`✅ Run créé: ${data.id}`)
     return res.json({ success: true, run_id: data.id, message: 'Run créé' })
 
   } catch (error: any) {
-    console.error('ERROR createRun:', error)
+    console.error('ERROR createRun:', error.message)
     return res.status(500).json({ error: 'Erreur création run', details: error.message })
   }
 }
@@ -300,13 +301,13 @@ async function addQuestions(adminId: string, params: any, res: Response) {
     }))
 
     const { data, error } = await supabase.from('run_questions').insert(payload).select()
-    if (error) throw error
+    if (error) { logSupabaseError('addQuestions', error); throw error }
 
     console.log(`✅ ${data.length} questions ajoutées`)
     return res.json({ success: true, count: data.length, message: `${data.length} question(s) ajoutée(s)` })
 
   } catch (error: any) {
-    console.error('ERROR addQuestions:', error)
+    console.error('ERROR addQuestions:', error.message)
     return res.status(500).json({ error: 'Erreur ajout questions', details: error.message })
   }
 }
@@ -339,13 +340,13 @@ async function setStarted(params: any, res: Response) {
       .update({ is_started: started })
       .eq('id', run_id)
 
-    if (error) throw error
+    if (error) { logSupabaseError('setStarted', error); throw error }
 
     console.log(`✅ is_started = ${started} pour run: ${run_id}`)
     return res.json({ success: true, message: started ? 'Run démarré (prêt à lancer)' : 'Run réinitialisé' })
 
   } catch (error: any) {
-    console.error('ERROR setStarted:', error)
+    console.error('ERROR setStarted:', error.message)
     return res.status(500).json({ error: 'Erreur démarrage run', details: error.message })
   }
 }
@@ -384,13 +385,13 @@ async function setVisibility(params: any, res: Response) {
       p_run_id:  run_id,
       p_visible: visible
     })
-    if (error) throw error
+    if (error) { logSupabaseError('setVisibility', error); throw error }
 
     console.log(`✅ is_visible = ${visible} pour run: ${run_id}`)
     return res.json({ success: true, message: visible ? 'Run visible — joueurs notifiés par polling' : 'Run masqué' })
 
   } catch (error: any) {
-    console.error('ERROR setVisibility:', error)
+    console.error('ERROR setVisibility:', error.message)
     return res.status(500).json({ error: 'Erreur visibilité', details: error.message })
   }
 }
@@ -411,9 +412,9 @@ async function closeRun(params: any, res: Response) {
       p_run_id: run_id,
       p_closed: closed
     })
-    if (error) throw error
+    if (error) { logSupabaseError('closeRun', error); throw error }
 
-    console.log(`✅ is_closed = ${closed} pour run: ${run_id} | reveal_answers géré par trigger BDD`)
+    console.log(`✅ is_closed = ${closed} pour run: ${run_id}`)
     return res.json({
       success: true,
       message: closed
@@ -422,7 +423,7 @@ async function closeRun(params: any, res: Response) {
     })
 
   } catch (error: any) {
-    console.error('ERROR closeRun:', error)
+    console.error('ERROR closeRun:', error.message)
     return res.status(500).json({ error: 'Erreur fermeture run', details: error.message })
   }
 }
@@ -462,12 +463,12 @@ async function listSessions(params: any, res: Response) {
       .eq('game_id', resolvedGameId)
       .order('created_at', { ascending: false })
 
-    if (error) throw error
+    if (error) { logSupabaseError('listSessions', error); throw error }
 
     return res.json({ success: true, sessions: sessions || [] })
 
   } catch (error: any) {
-    console.error('ERROR listSessions (admin):', error)
+    console.error('ERROR listSessions:', error.message)
     return res.status(500).json({ error: 'Erreur liste sessions', details: error.message })
   }
 }
@@ -490,12 +491,12 @@ async function listParties(params: any, res: Response) {
       .eq('session_id', session_id)
       .order('created_at', { ascending: true })
 
-    if (error) throw error
+    if (error) { logSupabaseError('listParties', error); throw error }
 
     return res.json({ success: true, parties: parties || [] })
 
   } catch (error: any) {
-    console.error('ERROR listParties:', error)
+    console.error('ERROR listParties:', error.message)
     return res.status(500).json({ error: 'Erreur liste parties', details: error.message })
   }
 }
@@ -518,12 +519,12 @@ async function listRuns(params: any, res: Response) {
       .eq('party_id', party_id)
       .order('created_at', { ascending: true })
 
-    if (error) throw error
+    if (error) { logSupabaseError('listRuns', error); throw error }
 
     return res.json({ success: true, runs: runs || [] })
 
   } catch (error: any) {
-    console.error('ERROR listRuns:', error)
+    console.error('ERROR listRuns:', error.message)
     return res.status(500).json({ error: 'Erreur liste runs', details: error.message })
   }
 }
@@ -546,12 +547,12 @@ async function listRunQuestions(params: any, res: Response) {
       .eq('run_id', run_id)
       .order('created_at', { ascending: true })
 
-    if (error) throw error
+    if (error) { logSupabaseError('listRunQuestions', error); throw error }
 
     return res.json({ success: true, questions: questions || [] })
 
   } catch (error: any) {
-    console.error('ERROR listRunQuestions:', error)
+    console.error('ERROR listRunQuestions:', error.message)
     return res.status(500).json({ error: 'Erreur liste questions', details: error.message })
   }
 }
@@ -574,7 +575,7 @@ async function getStatistics(params: any, res: Response) {
       .eq('id', run_id)
       .maybeSingle()
 
-    if (runError) throw runError
+    if (runError) { logSupabaseError('getStatistics/run', runError); throw runError }
     if (!run) return res.status(404).json({ error: 'Run introuvable' })
 
     const [
@@ -603,7 +604,7 @@ async function getStatistics(params: any, res: Response) {
     })
 
   } catch (error: any) {
-    console.error('ERROR getStatistics:', error)
+    console.error('ERROR getStatistics:', error.message)
     return res.status(500).json({ error: 'Erreur stats', details: error.message })
   }
 }
@@ -630,7 +631,7 @@ async function getPartyPlayers(params: any, res: Response) {
       .eq('party_id', party_id)
       .order('score', { ascending: false })
 
-    if (error) throw error
+    if (error) { logSupabaseError('getPartyPlayers', error); throw error }
 
     const formatted = (players || []).map((p: any, index: number) => ({
       rank:       index + 1,
@@ -644,16 +645,15 @@ async function getPartyPlayers(params: any, res: Response) {
     return res.json({ success: true, players: formatted })
 
   } catch (error: any) {
-    console.error('ERROR getPartyPlayers:', error)
+    console.error('ERROR getPartyPlayers:', error.message)
     return res.status(500).json({ error: 'Erreur joueurs party', details: error.message })
   }
 }
 
 // =====================================================
 // DELETE SESSION
-// CASCADE configuré en BDD → supprime automatiquement :
-// game_parties → game_runs → run_questions, user_run_answers
-// party_players, game_session_stats, user_session_access, session_players
+// Toutes les FK ont ON DELETE CASCADE en BDD →
+// suppression automatique de toutes les données enfants
 // =====================================================
 
 async function deleteSession(params: any, res: Response) {
@@ -664,18 +664,23 @@ async function deleteSession(params: any, res: Response) {
   }
 
   try {
+    console.log(`🗑️ Tentative suppression session: ${session_id}`)
+
     const { error } = await supabase
       .from('game_sessions')
       .delete()
       .eq('id', session_id)
 
-    if (error) throw error
+    if (error) {
+      logSupabaseError('deleteSession', error)
+      throw error
+    }
 
     console.log(`✅ Session supprimée: ${session_id}`)
     return res.json({ success: true, message: 'Session supprimée' })
 
   } catch (error: any) {
-    console.error('ERROR deleteSession:', error)
+    console.error('ERROR deleteSession:', error.message)
     return res.status(500).json({ error: 'Erreur suppression session', details: error.message })
   }
 }
@@ -704,24 +709,31 @@ async function deleteParty(params: any, res: Response) {
       return res.status(403).json({ error: 'La party initiale ne peut pas être supprimée' })
     }
 
+    console.log(`🗑️ Tentative suppression party: ${party_id}`)
+
     const { error } = await supabase
       .from('game_parties')
       .delete()
       .eq('id', party_id)
 
-    if (error) throw error
+    if (error) {
+      logSupabaseError('deleteParty', error)
+      throw error
+    }
 
     console.log(`✅ Party supprimée: ${party_id}`)
     return res.json({ success: true, message: 'Party supprimée' })
 
   } catch (error: any) {
-    console.error('ERROR deleteParty:', error)
+    console.error('ERROR deleteParty:', error.message)
     return res.status(500).json({ error: 'Erreur suppression party', details: error.message })
   }
 }
 
 // =====================================================
 // DELETE RUN
+// [FIX v3] : autorise suppression si run fermé (is_closed=true)
+// Bloque uniquement si en cours : démarré ET pas encore fermé
 // =====================================================
 
 async function deleteRun(params: any, res: Response) {
@@ -734,26 +746,33 @@ async function deleteRun(params: any, res: Response) {
   try {
     const { data: run } = await supabase
       .from('game_runs')
-      .select('is_started')
+      .select('is_started, is_closed')
       .eq('id', run_id)
       .maybeSingle()
 
     if (!run) return res.status(404).json({ error: 'Run non trouvé' })
 
-    if (run.is_started) {
+    // Bloquer uniquement si en cours (démarré ET pas encore fermé)
+    // Un run fermé peut toujours être supprimé
+    if (run.is_started && !run.is_closed) {
       return res.status(403).json({
-        error: 'Impossible de supprimer un run déjà démarré. Fermez-le d\'abord.'
+        error: 'Impossible de supprimer un run en cours. Fermez-le d\'abord (étape 3 — Fermer & Révéler).'
       })
     }
 
+    console.log(`🗑️ Tentative suppression run: ${run_id}`)
+
     const { error } = await supabase.from('game_runs').delete().eq('id', run_id)
-    if (error) throw error
+    if (error) {
+      logSupabaseError('deleteRun', error)
+      throw error
+    }
 
     console.log(`✅ Run supprimé: ${run_id}`)
     return res.json({ success: true, message: 'Run supprimé' })
 
   } catch (error: any) {
-    console.error('ERROR deleteRun:', error)
+    console.error('ERROR deleteRun:', error.message)
     return res.status(500).json({ error: 'Erreur suppression run', details: error.message })
   }
 }
@@ -770,12 +789,15 @@ async function deleteQuestion(params: any, res: Response) {
   }
 
   try {
+    console.log(`🗑️ Tentative suppression question: ${question_id}`)
+
     const { error } = await supabase
       .from('run_questions')
       .delete()
       .eq('id', question_id)
 
     if (error) {
+      logSupabaseError('deleteQuestion', error)
       if (error.message.includes('started')) {
         return res.status(403).json({ error: 'Impossible de supprimer : le run a déjà démarré' })
       }
@@ -786,7 +808,7 @@ async function deleteQuestion(params: any, res: Response) {
     return res.json({ success: true, message: 'Question supprimée' })
 
   } catch (error: any) {
-    console.error('ERROR deleteQuestion:', error)
+    console.error('ERROR deleteQuestion:', error.message)
     return res.status(500).json({ error: 'Erreur suppression question', details: error.message })
   }
 }
