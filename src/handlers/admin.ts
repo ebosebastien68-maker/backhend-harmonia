@@ -1,20 +1,31 @@
 // =====================================================
 // HANDLER ADMIN - VERSION SÉCURISÉE
-// Changements vs version précédente :
-//   + setStarted          → étape 1 du cycle (is_started = true)
-//   + setVisibility       → étape 2 (is_visible = true = top départ)
-//   + closeRun            → étape 3 (is_closed = true → trigger BDD → reveal_answers = true)
-//   + listRunQuestions    → liste les questions d'un run (avec correct_answer visible côté admin)
-//   + deleteSession       → suppression session
-//   + deleteParty         → suppression party
-//   ~ addQuestions        → bloque si is_started=true (et non seulement is_started)
+// CORRECTION CRITIQUE :
+//   Le signInWithPassword utilisait supabaseAdmin (singleton Service Role),
+//   ce qui corrompait son état auth in-memory et faisait échouer toutes
+//   les opérations DB suivantes (RLS appliqué au lieu du Service Role).
+//   → Fix : client auth temporaire jetable pour la vérification credentials.
+//     supabaseAdmin reste intact avec la Service Role key pour toutes les BDD ops.
 // =====================================================
 
 import { Request, Response } from 'express'
+import { createClient } from '@supabase/supabase-js'
 import supabase from '../config/supabase'
 
 const isValidUUID = (id: string) =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)
+
+// ─── Client temporaire pour vérification credentials uniquement ───────────────
+// NE PAS utiliser supabaseAdmin pour signInWithPassword : ça mute son état
+// in-memory et remplace la Service Role key par le JWT utilisateur pour
+// toutes les requêtes DB suivantes → échec RLS sur DELETE/UPDATE.
+function createAuthClient() {
+  return createClient(
+    process.env.SUPABASE_URL!,
+    process.env.SUPABASE_ANON_KEY!,
+    { auth: { autoRefreshToken: false, persistSession: false } }
+  )
+}
 
 export async function handleAdmin(req: Request, res: Response) {
   const { function: functionName, email, password, ...params } = req.body
@@ -26,8 +37,11 @@ export async function handleAdmin(req: Request, res: Response) {
   }
 
   try {
-    // ========== AUTHENTIFICATION ==========
-    const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+    // ========== AUTHENTIFICATION (client temporaire jetable) ==========
+    // On utilise un client ANON+JWT éphémère pour vérifier les credentials.
+    // supabaseAdmin (Service Role) n'est jamais touché → reste intact pour les BDD ops.
+    const authClient = createAuthClient()
+    const { data: authData, error: authError } = await authClient.auth.signInWithPassword({
       email: email.trim(),
       password
     })
@@ -37,7 +51,7 @@ export async function handleAdmin(req: Request, res: Response) {
       return res.status(401).json({ error: 'Email ou mot de passe incorrect' })
     }
 
-    // ========== VÉRIFICATION PROFIL + RÔLE ==========
+    // ========== VÉRIFICATION PROFIL + RÔLE (supabaseAdmin — Service Role) ==========
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('id, role, nom, prenom')
@@ -71,31 +85,23 @@ export async function handleAdmin(req: Request, res: Response) {
 
     // ========== ROUTAGE ==========
     switch (functionName) {
-      // Création
       case 'createSession':     return await createSession(profile.id, params, res)
       case 'createParty':       return await createParty(profile.id, params, res)
       case 'createRun':         return await createRun(profile.id, params, res)
       case 'addQuestions':      return await addQuestions(profile.id, params, res)
-
-      // Cycle de vie du run (3 étapes)
-      case 'setStarted':        return await setStarted(params, res)      // Étape 1
-      case 'setVisibility':     return await setVisibility(params, res)   // Étape 2 : top départ
-      case 'closeRun':          return await closeRun(params, res)        // Étape 3 : fermer + révéler
-
-      // Lecture
+      case 'setStarted':        return await setStarted(params, res)
+      case 'setVisibility':     return await setVisibility(params, res)
+      case 'closeRun':          return await closeRun(params, res)
       case 'listSessions':      return await listSessions(params, res)
       case 'listParties':       return await listParties(params, res)
       case 'listRuns':          return await listRuns(params, res)
       case 'listRunQuestions':  return await listRunQuestions(params, res)
       case 'getStatistics':     return await getStatistics(params, res)
       case 'getPartyPlayers':   return await getPartyPlayers(params, res)
-
-      // Suppression
       case 'deleteSession':     return await deleteSession(params, res)
       case 'deleteParty':       return await deleteParty(params, res)
       case 'deleteRun':         return await deleteRun(params, res)
       case 'deleteQuestion':    return await deleteQuestion(params, res)
-
       default:
         return res.status(400).json({ error: `Fonction inconnue: ${functionName}` })
     }
@@ -257,7 +263,6 @@ async function createRun(adminId: string, params: any, res: Response) {
 
 // =====================================================
 // ADD QUESTIONS
-// Bloqué si run déjà visible ou démarré
 // =====================================================
 
 async function addQuestions(adminId: string, params: any, res: Response) {
@@ -308,8 +313,6 @@ async function addQuestions(adminId: string, params: any, res: Response) {
 
 // =====================================================
 // SET STARTED — ÉTAPE 1
-// L'admin prépare le run. La question est prête mais
-// personne ne la voit encore (is_visible reste false).
 // =====================================================
 
 async function setStarted(params: any, res: Response) {
@@ -320,7 +323,6 @@ async function setStarted(params: any, res: Response) {
   }
 
   try {
-    // Vérifier qu'il y a au moins une question avant de démarrer
     if (started) {
       const { count } = await supabase
         .from('run_questions')
@@ -349,9 +351,7 @@ async function setStarted(params: any, res: Response) {
 }
 
 // =====================================================
-// SET VISIBILITY — ÉTAPE 2 (TOP DÉPART)
-// is_visible = true → tous les joueurs voient la question
-// simultanément via le polling frontend.
+// SET VISIBILITY — ÉTAPE 2
 // =====================================================
 
 async function setVisibility(params: any, res: Response) {
@@ -362,7 +362,6 @@ async function setVisibility(params: any, res: Response) {
   }
 
   try {
-    // Vérifier que le run est démarré avant de le rendre visible
     if (visible) {
       const { data: run } = await supabase
         .from('game_runs')
@@ -397,9 +396,7 @@ async function setVisibility(params: any, res: Response) {
 }
 
 // =====================================================
-// CLOSE RUN — ÉTAPE 3 (FERMER + RÉVÉLER)
-// is_closed = true → trigger BDD → reveal_answers = true
-// Les joueurs voient automatiquement la bonne réponse + scores.
+// CLOSE RUN — ÉTAPE 3
 // =====================================================
 
 async function closeRun(params: any, res: Response) {
@@ -416,7 +413,6 @@ async function closeRun(params: any, res: Response) {
     })
     if (error) throw error
 
-    // Le trigger sync_reveal_on_close se charge de passer reveal_answers=true automatiquement
     console.log(`✅ is_closed = ${closed} pour run: ${run_id} | reveal_answers géré par trigger BDD`)
     return res.json({
       success: true,
@@ -534,8 +530,6 @@ async function listRuns(params: any, res: Response) {
 
 // =====================================================
 // LIST RUN QUESTIONS (admin)
-// L'admin voit correct_answer et score directement
-// depuis run_questions (pas la vue filtrée).
 // =====================================================
 
 async function listRunQuestions(params: any, res: Response) {
@@ -657,6 +651,9 @@ async function getPartyPlayers(params: any, res: Response) {
 
 // =====================================================
 // DELETE SESSION
+// CASCADE configuré en BDD → supprime automatiquement :
+// game_parties → game_runs → run_questions, user_run_answers
+// party_players, game_session_stats, user_session_access, session_players
 // =====================================================
 
 async function deleteSession(params: any, res: Response) {
@@ -674,6 +671,7 @@ async function deleteSession(params: any, res: Response) {
 
     if (error) throw error
 
+    console.log(`✅ Session supprimée: ${session_id}`)
     return res.json({ success: true, message: 'Session supprimée' })
 
   } catch (error: any) {
@@ -713,6 +711,7 @@ async function deleteParty(params: any, res: Response) {
 
     if (error) throw error
 
+    console.log(`✅ Party supprimée: ${party_id}`)
     return res.json({ success: true, message: 'Party supprimée' })
 
   } catch (error: any) {
@@ -723,7 +722,6 @@ async function deleteParty(params: any, res: Response) {
 
 // =====================================================
 // DELETE RUN
-// Bloqué si le run est déjà démarré
 // =====================================================
 
 async function deleteRun(params: any, res: Response) {
@@ -751,6 +749,7 @@ async function deleteRun(params: any, res: Response) {
     const { error } = await supabase.from('game_runs').delete().eq('id', run_id)
     if (error) throw error
 
+    console.log(`✅ Run supprimé: ${run_id}`)
     return res.json({ success: true, message: 'Run supprimé' })
 
   } catch (error: any) {
@@ -761,7 +760,6 @@ async function deleteRun(params: any, res: Response) {
 
 // =====================================================
 // DELETE QUESTION
-// Le trigger BDD bloque si run déjà démarré
 // =====================================================
 
 async function deleteQuestion(params: any, res: Response) {
@@ -784,6 +782,7 @@ async function deleteQuestion(params: any, res: Response) {
       throw error
     }
 
+    console.log(`✅ Question supprimée: ${question_id}`)
     return res.json({ success: true, message: 'Question supprimée' })
 
   } catch (error: any) {
